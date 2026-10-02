@@ -7,6 +7,8 @@ const output = path.join(root, 'public-release', 'ProjectHub');
 const files = [
   'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
   'scripts/export-public.js', 'scripts/public.gitignore',
+  'docs/screenshots/conversation-redacted.png',
+  'docs/screenshots/queued-instructions-redacted.png',
   'hub/.gitignore', 'hub/README.md', 'hub/CHANGELOG.md',
   'hub/package.json', 'hub/package-lock.json', 'hub/server.js',
   'hub/setup.sh', 'hub/start.command',
