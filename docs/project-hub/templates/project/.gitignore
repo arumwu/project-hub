@@ -1,0 +1,16 @@
+# 手元の秘密設定（例示ファイルは公開前に中身を確認する）
+.env
+.env.*
+!.env.example
+!.env.sample
+.npmrc
+.dev.vars
+.dev.vars.*
+.claude/settings.local.json
+
+# AI の会話・引き継ぎ・一時作業
+.ai/chat/
+.ai/handoff/
+.ai/work/
+node_modules/
+.DS_Store

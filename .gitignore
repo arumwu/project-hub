@@ -1,0 +1,17 @@
+node_modules/
+public-release/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+!.env.sample
+.npmrc
+.dev.vars
+.dev.vars.*
+.claude/settings.local.json
+.ai/chat/
+.ai/handoff/
+.ai/work/
+_hub/log*.jsonl
+Inbox/hub/

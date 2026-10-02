@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Project Hub アイコンの見本（Claude 作）。Codex はこれを元に仕上げる -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a3350"/>
+      <stop offset="1" stop-color="#151a28"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.52" r="0.45">
+      <stop offset="0" stop-color="#5b78ff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#5b78ff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <!-- 土台：macOS の角丸の正方形（外側 100px は余白） -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)" filter="url(#shadow)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#glow)"/>
+  <!-- 枝：中心（Hub）から3つの担当へ -->
+  <g stroke-width="26" stroke-linecap="round" fill="none">
+    <path d="M512 540 L318 336" stroke="#e58b58" stroke-opacity="0.85"/>
+    <path d="M512 540 L706 336" stroke="#4cc2c2" stroke-opacity="0.85"/>
+    <path d="M512 540 L512 790" stroke="#a893f0" stroke-opacity="0.85"/>
+  </g>
+  <!-- 担当：Claude Code（橙の丸）・Codex（青緑の丸）・エージェント（紫の角丸） -->
+  <circle cx="318" cy="336" r="66" fill="#e58b58"/>
+  <circle cx="706" cy="336" r="66" fill="#4cc2c2"/>
+  <rect x="448" y="734" width="128" height="128" rx="30" fill="#a893f0"/>
+  <!-- 中心：進み具合の輪と完了の印 -->
+  <circle cx="512" cy="540" r="150" fill="#1b2133"/>
+  <circle cx="512" cy="540" r="150" fill="none" stroke="#323b58" stroke-width="28"/>
+  <circle cx="512" cy="540" r="150" fill="none" stroke="#6f8bff" stroke-width="28" stroke-linecap="round"
+          stroke-dasharray="706 943" transform="rotate(-90 512 540)"/>
+  <circle cx="512" cy="540" r="96" fill="#f4f6fb"/>
+  <path d="M466 542 L500 576 L562 510" stroke="#2c4bd6" stroke-width="30" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
