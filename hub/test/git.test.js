@@ -172,6 +172,30 @@ test('初回の保存と未コミットrepoの準備でも秘密設定を追跡�
   }
 });
 
+test('GitHub の場所：origin を https の形にし、今のブランチと合わせて返す（120秒覚える）', () => {
+  const d = repo('remote');
+  sh(d, 'checkout', '-q', '-b', 'feature/x');
+  sh(d, 'remote', 'add', 'origin', 'git@github.com:kieiken/admin.git');
+  g.remoteInfoCache.clear();
+  const a = g.remoteInfo(d);
+  assert.deepStrictEqual(a, { url: 'https://github.com/kieiken/admin', branch: 'feature/x' });
+  // 覚えている間は同じ物を返す。fresh なら読み直す
+  sh(d, 'remote', 'set-url', 'origin', 'ssh://git@github.com/kieiken/other.git');
+  assert.strictEqual(g.remoteInfo(d), a);
+  assert.strictEqual(g.remoteInfo(d, { fresh: true }).url, 'https://github.com/kieiken/other');
+  // 途中のコミットを見ている時はブランチ名を空に
+  sh(d, 'checkout', '-q', '--detach');
+  assert.strictEqual(g.remoteInfo(d, { fresh: true }).branch, '');
+  // origin が無い・Git でない・無い場所は null
+  assert.strictEqual(g.remoteInfo(repo('no-origin')), null);
+  const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-plain-'));
+  assert.strictEqual(g.remoteInfo(plain), null);
+  assert.strictEqual(g.remoteInfo(path.join(tmp, 'nothing')), null);
+  // URL の形
+  assert.strictEqual(g.webUrl('https://user:secret@github.com/o/r.git'), 'https://github.com/o/r');
+  assert.strictEqual(g.webUrl('/local/path/repo.git'), '');
+});
+
 test('コピーされた秘密設定を取り込まず、作業成果だけ本体へ反映する', () => {
   const main = repo('private-copy');
   fs.writeFileSync(path.join(main, '.env.local'), 'LOCAL_TEST_VALUE=placeholder\n');
@@ -184,4 +208,18 @@ test('コピーされた秘密設定を取り込まず、作業成果だけ本�
   assert.strictEqual(sh(main, 'ls-tree', '-r', '--name-only', 'HEAD'), 'a.txt\nresult.txt');
   assert.ok(fs.existsSync(path.join(main, '.env.local')));
   assert.ok(fs.existsSync(path.join(m.trashed, '.env.local')));
+});
+
+test('取り込み証跡はその作業の変更だけを示し、別本体・存在しないcommitを拒否する', () => {
+  const main = repo('receipt'), workRoot = path.join(tmp, 'Work', 'receipt');
+  const r = g.prepare({base:main,workRoot,taskId:'child'});
+  fs.writeFileSync(path.join(r.dir,'child.txt'),'child result\n');
+  fs.writeFileSync(path.join(main,'parent.txt'),'unrelated parent change\n');
+  const m = g.merge({dir:r.dir,workRoot,title:'child'});
+  assert.ok(m.ok,m.error);assert.deepStrictEqual(m.files,['child.txt']);
+  const receipt = g.integrationReceipt(main,m);
+  assert.strictEqual(receipt.commit,m.commit);assert.deepStrictEqual(receipt.files,['child.txt']);
+  assert.strictEqual(g.integrationReceipt(repo('other-receipt'),m),null);
+  assert.strictEqual(g.integrationReceipt(main,{...m,commit:'f'.repeat(40)}),null);
+  assert.strictEqual(g.integrationReceipt(main,{main,files:['child.txt']}),null);
 });

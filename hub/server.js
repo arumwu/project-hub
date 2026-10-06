@@ -2,6 +2,7 @@
 // Project Hub 第2版：台帳の一覧、画面の中の作業画面、役割・モデル・思考の設定
 // 使い方: node server.js  →  http://127.0.0.1:4545
 const http = require('http');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -12,17 +13,84 @@ const { Sessions } = require('./lib/sessions');
 const gitw = require('./lib/git');
 const transcript = require('./lib/transcript');
 const chat = require('./lib/chat');
+const start = require('./lib/start');
 const { AiTools } = require('./lib/ai-tools');
+const { Usage } = require('./lib/usage');
+const { LimitEvidence } = require('./lib/limit-evidence');
+const remoteLib = require('./lib/remote');
+const { guidance } = require('./lib/guidance');
+const instructions = require('./lib/instructions');
+const { AsyncLocalStorage } = require('async_hooks');
 
 const PORT = Number(process.env.HUB_PORT || 4545);
 const ROOT = expandHome(process.env.HUB_ROOT || path.join(os.homedir(), 'Documents', 'AI-Workspace'));
 const DRY = process.env.HUB_DRY_RUN === '1'; // テスト用：実際には起動しない
+const limitEvidence = new LimitEvidence(path.join(ROOT, '_hub', 'limits.json'));
+const usage = new Usage({ dry: DRY, observe: snapshot => {
+  try { limitEvidence.observe(snapshot); } catch { /* 保存失敗では直前の保持状態を維持 */ }
+} });
+async function refreshLimitEvidence(request) {
+  if (request.ai !== 'claude' || launch.flagFor('claude', request.model) !== 'claude-fable-5-1' ||
+      request.limitSwitch || !fableBackup(rolesData(), request.role) || !limitEvidence.needsRefresh()) return;
+  let timer;
+  try {
+    await Promise.race([usage.status(true), new Promise(resolve => { timer = setTimeout(resolve, 20000); })]);
+  } catch { /* 取得失敗では上限継続として扱わない */ } finally { clearTimeout(timer); }
+}
 const PUBLIC = path.join(__dirname, 'public');
 const ROLES_FILE = path.join(ROOT, '_hub', 'roles.yaml');
 const store = new Store(ROOT);
+const projectOrder = new (require('./lib/project-order').ProjectOrder)(store);
+// 外から使う（iPhone）の設定と、今の要求が外からかどうか（記録に「外から」と印を付けるため）
+const remote = new remoteLib.Remote({ file: path.join(ROOT, '_hub', 'remote.json') });
+const reqCtx = new AsyncLocalStorage();
+const fromRemote = () => Boolean(reqCtx.getStore()?.remote);
 const sessions = new Sessions();
 const chats = new chat.ChatRunner({ dirOf: id => { const p = store.readProject(id); return p ? p.dir : ''; },
-  canStart: (ai, model) => aiTools.isOperating() ? 'AI の更新・モデル再取得が進行中です' : modelError(ai, model) });
+  delegates: (p, t) => [...readLog(5000), ...readLog(5000, LOG_FILE.replace(/\.jsonl$/, '.old.jsonl'))].filter(r => r.project === p && r.task === t),
+  permFor: permCmd,
+  limitBackup: o => fableBackup(rolesData(), o.role),
+  limitPreflight: () => limitEvidence.active(),
+  beforeQueued: refreshLimitEvidence,
+  onLimit: o => {
+    try { limitEvidence.record(o); }
+    catch (e) { record('limit-save-error', o); throw e; }
+    void usage.status(true).catch(() => {});
+  },
+  onFableSuccess: started => limitEvidence.success(started),
+  refreshQueued: o => {
+    const p = store.readProject(o.project), t = p?.tasks.find(t => t.id === o.task);
+    if (!p || !t) throw Error('作業が見つかりません');
+    const dir = o.dir && fs.existsSync(o.dir) ? o.dir : workDir(p, t).dir;
+    if (!dir || !fs.existsSync(dir)) throw Error('作業場所を用意できませんでした');
+    return { dir, policy: modelPolicy(p, t), basePrompt: taskPrompt(p, t, store.taskFile(p.id, t.id), dir) + ' ここは会話画面。人からの依頼に答え、区切りで作業ファイルを更新すること。' };
+  },
+  canStart: (ai, model, o) => {
+    if (aiTools.isOperating()) return 'AI の更新・モデル再取得が進行中です';
+    const invalid=modelError(ai,model); if(invalid)return invalid;
+    if(o) { const p=store.readProject(o.project), t=p?.tasks.find(t=>t.id===o.task);
+      if(!p || !t)return '作業が見つかりません';
+      if(o.requireModel && t.state === '完了')return DELEGATE_COMPLETED_ERROR;
+      if(o.requireModel) {const blocked=delegateTerminalError(p.id,t.id);if(blocked)return blocked;}
+      try {assertWorkspaceIdle(p,t,false);} catch(e) {return e.message;}
+    }
+    return '';
+  } });
+const { Maintenance } = require('./lib/maintenance');
+const emptyLib = require('./lib/empty');
+const maintenance = new Maintenance({store,baseOf,busy:id=>{
+  const p=store.readProject(id);if(!p)return false;
+  const all=store.listProjects(), familyIds=require('./lib/work-context').family(p,all).map(q=>q.id);
+  const base=fs.realpathSync(baseOf(p));
+  if (github.locked(base)) return true;
+  const active=[...sessions.list().filter(x=>x.running),...[...chats.running.keys()].map(k=>({project:k.split('\u0000')[0]}))];
+  return procwatch.list().some(x=>x.project && (familyIds.includes(x.project)||all.some(q=>q.id===x.project&&fs.realpathSync(baseOf(q))===base))) || active.some(a=>{const q=all.find(x=>x.id===a.project);return q && (familyIds.includes(q.id) || fs.realpathSync(baseOf(q))===base);});
+}});
+const {Removal}=require('./lib/remove');
+const removal=new Removal({store,locked:id=>{const p=store.readProject(id);return p?maintenance.locked(id):false;},busy:(project,task)=>
+  sessions.list().some(x=>x.running&&x.project===project&&(!task||x.task===task)) ||
+  [...chats.running.keys()].some(k=>k.split('\u0000')[0]===project&&(!task||k.split('\u0000')[1]===task)) ||
+  procwatch.list().some(x=>x.project===project&&(!task||!x.task||x.task===task))});
 const aiTools = new AiTools({ root: ROOT, dry: DRY, busy: () => sessions.list().filter(x => x.running).length + chats.running.size });
 function applyModelCatalog() {
   const catalog = aiTools.catalog();
@@ -33,7 +101,15 @@ applyModelCatalog();
 
 // 版：起動した時の番号と、ファイル上の番号（更新を取り込むと変わる）
 const PKG = path.join(__dirname, 'package.json');
-const readVersion = () => { try { return JSON.parse(fs.readFileSync(PKG, 'utf8')).version || ''; } catch (e) { return ''; } };
+// 版の番号：package.json が変わっていなければ読み直さない（一覧のたびに読んでいた）
+let pkgSeen = null;
+const readVersion = () => {
+  try {
+    const st = fs.statSync(PKG), key = `${st.mtimeMs}:${st.size}`;
+    if (!pkgSeen || pkgSeen.key !== key) pkgSeen = { key, version: JSON.parse(fs.readFileSync(PKG, 'utf8')).version || '' };
+    return pkgSeen.version;
+  } catch (e) { return ''; }
+};
 const VERSION = readVersion();
 function changelog(n) {
   let text = '';
@@ -48,7 +124,7 @@ function changelog(n) {
   return out;
 }
 
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/manifest+json', '.png': 'image/png' };
 
 function send(res, code, body, type = 'application/json; charset=utf-8') {
   res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -79,12 +155,12 @@ function record(action, b, extra) {
   try {
     fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
     if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 1024 * 1024) fs.renameSync(LOG_FILE, LOG_FILE.replace(/\.jsonl$/, '.old.jsonl'));
-    const row = { at: new Date().toISOString(), action, project: b.project, task: b.task, ai: b.ai || b.to, ...(extra || {}) };
+    const row = { at: new Date().toISOString(), action, project: b.project, task: b.task, ai: b.ai || b.to, ...(extra || {}), ...(fromRemote() ? { remote: true } : {}) };
     fs.appendFileSync(LOG_FILE, JSON.stringify(row) + '\n');
   } catch (e) { /* 記録できなくても操作は続ける */ }
 }
-function readLog(n) {
-  try { return fs.readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(-n).reverse().map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean); }
+function readLog(n, file = LOG_FILE) {
+  try { return fs.readFileSync(file, 'utf8').trim().split('\n').slice(-n).reverse().map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean); }
   catch (e) { return []; }
 }
 
@@ -118,7 +194,7 @@ function loadCliModels() {
   try { o = JSON.parse(fs.readFileSync(CLI_MODELS, 'utf8')); } catch (e) { o = {}; }
   // 4.5.1 までに「断られたので渡さない」と自動で覚えた空の名前は、推測した名前へのものなので消す（1回だけ）
   if (o && !o.v && Object.keys(o).length) {
-    for (const ai of ['claude', 'codex']) for (const [k, v] of Object.entries(o[ai] || {})) if (v === '') delete o[ai][k];
+    for (const ai of launch.AIS) for (const [k, v] of Object.entries(o[ai] || {})) if (v === '') delete o[ai][k];
     o.v = 2;
     try { fs.writeFileSync(CLI_MODELS, JSON.stringify(o, null, 2)); } catch (e) { /* 書けなくても続ける */ }
   }
@@ -130,38 +206,142 @@ loadCliModels();
 function cliModelHints() {
   const home = process.env.HUB_AI_HOME || os.homedir();
   const catalog = aiTools.catalog();
-  const out = { claude: new Set(catalog.claude.models.map(x => x.id)), codex: new Set(catalog.codex.models.map(x => x.id)) };
+  const out = { claude: new Set(catalog.claude.models.map(x => x.id)), codex: new Set(catalog.codex.models.map(x => x.id)), agy: new Set(catalog.agy.models.map(x => x.id)) };
   try { const m = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8').match(/^\s*model\s*=\s*"([^"]+)"/m); if (m) out.codex.add(m[1]); } catch (e) { /* 無い */ }
   try { const j = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8')); if (j.model) out.claude.add(j.model); } catch (e) { /* 無い */ }
-  return { claude: [...out.claude], codex: [...out.codex] };
+  return { claude: [...out.claude], codex: [...out.codex], agy: [...out.agy] };
 }
 
 function rolesData() { return roles.read(ROLES_FILE).data; }
-// 選ぶ欄に出さないモデル（設定画面で選ぶ）。_hub/model-view.json
-const MODEL_VIEW = path.join(ROOT, '_hub', 'model-view.json');
-function hiddenModels() {
-  try { const h = JSON.parse(fs.readFileSync(MODEL_VIEW, 'utf8')).hidden || {}; return { 'claude-code': [].concat(h['claude-code'] || []).map(String), codex: [].concat(h.codex || []).map(String) }; }
-  catch (e) { return { 'claude-code': [], codex: [] }; }
+
+function delegateTerminalError(project, task) {
+  const terminals = sessions.list().filter(s => s.project === project && s.task === task && s.running);
+  if (!terminals.length) return '';
+  const names = [...new Set(terminals.map(s => launch.AI_LABEL[s.ai] || s.ai))].join('・');
+  return `この作業のターミナルで AI（${names}）が動いているため、委任できません。人に「この作業の作業画面で［ターミナル］に切り替え、${names}の欄の［停止］を押してから、会話でもう一度頼んでください」と案内してください。会話画面の［停止］は押させない（待っている指示も取り消されます）。裏で別の CLI を起動したり、この依頼を繰り返し送ったりしないでください。`;
 }
 
+// 人が承認した例外は司令塔・チェックの Fable → Astra だけ。別の予備担当には広げない。
+function fableBackup(data, role) {
+  if (data.switch.auto !== true || (role && !['司令塔', 'チェック'].includes(role))) return null;
+  const r = data.roles.find(r => ['司令塔', 'チェック'].includes(r.name) && (!role || r.name === role) &&
+    r.main.ai === 'claude-code' && launch.flagFor('claude', r.main.model) === 'claude-fable-5-1' &&
+    r.backup.ai === 'codex' && launch.flagFor('codex', r.backup.model) === 'gpt-6-astra' && roles.EFFORTS.includes(r.backup.effort));
+  return r ? { ai: 'codex', model: launch.modelLabel('codex', r.backup.model), effort: r.backup.effort, role: r.name,
+    requireModel: true, requiredModel: 'gpt-6-astra', perm: permCmd('codex') } : null;
+}
+// ChatGPT アプリ・Codex の設定ファイル（~/.codex/config.toml）に、Hub の MCP が登録されているか
+const CODEX_CONFIG = () => path.join(process.env.HUB_AI_HOME || os.homedir(), '.codex', 'config.toml');
+const MCP_BLOCK = () => `\n# Project Hub の道具（作業を読む・結果を書き戻す）。Hub を起動しておくこと\n[mcp_servers.project-hub]\ncommand = "node"\nargs = ["${path.join(__dirname, 'mcp.js')}"]\n`;
+function codexMcpStatus() {
+  let text = '';
+  try { text = fs.readFileSync(CODEX_CONFIG(), 'utf8'); } catch (e) { return { registered: false, configFile: CODEX_CONFIG(), configExists: false }; }
+  return { registered: /^\s*\[mcp_servers\.project-hub\]/m.test(text), configFile: CODEX_CONFIG(), configExists: true };
+}
+function codexMcpRegister() {
+  const file = CODEX_CONFIG();
+  let text = '';
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') return { error: `設定ファイルを読めません：${file}` }; }
+  if (/^\s*\[mcp_servers\.project-hub\]/m.test(text)) return { file, added: false };
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    if (text) fs.copyFileSync(file, `${file}.bak-${new Date().toISOString().slice(0, 10)}`); // 念のため前の内容を残す
+    fs.writeFileSync(file, text.replace(/\s*$/, '') + (text ? '\n' : '') + MCP_BLOCK());
+  } catch (e) { return { error: `設定ファイルに書けません：${e.message}` }; }
+  return { file, added: true };
+}
+// 表示・非表示と順番を同じ設定へ、互いを保って保存する。
+const modelView = new (require('./lib/model-view').ModelView)(path.join(ROOT, '_hub', 'model-view.json'));
+const hiddenModels = () => modelView.hidden();
+
+// 未読：見ていない間に AI の作業が終わった作業（_hub/unread.json に「プロジェクト\0作業」で残す）
+const UNREAD_FILE = path.join(ROOT, '_hub', 'unread.json');
+const unread = new Set((() => { try { return [].concat(JSON.parse(fs.readFileSync(UNREAD_FILE, 'utf8')).items || []).map(String); } catch (e) { return []; } })());
+function saveUnread() {
+  try { // 書きかけを読まないよう、別の名前に書いてから置き換える
+    fs.mkdirSync(path.dirname(UNREAD_FILE), { recursive: true });
+    const tmp = `${UNREAD_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ items: [...unread] }, null, 2));
+    fs.renameSync(tmp, UNREAD_FILE);
+  } catch (e) { /* 書けなくても続ける */ }
+}
+function setUnread(project, task, on) {
+  const k = `${project}\u0000${task}`;
+  if (!project || !task || on === unread.has(k)) return;
+  if (on) unread.add(k); else unread.delete(k);
+  saveUnread();
+}
+function pruneUnread() {
+  if (require('./lib/unread').removeMissing(unread, store.product)) saveUnread();
+}
+// 会話の1回分が終わった時：誰も会話画面を見ていなければ未読にする
+const chatEnded = (project, task) => { if (!(chats.watchers.get(chats.key(project, task))?.size > 0)) setUnread(project, task, true); };
+// 作業画面（端末）が終わった時：見ている画面が無く、人が止めたのでなければ未読にする
+sessions.onExit = (project, task, ai, s) => { if (!s?.stopped && !(s?.watchers.size > 0)) setUnread(project, task, true); };
+// ChatGPT との連携：mcp.js から /api/mcp/* で呼ばれる道具。報告は会話画面にも流し、未読にする
+// 子プロジェクトの結果を親へ渡す（親の受け取る作業に書き、会話に流し、未読にする）。失敗しても元の操作は続ける
+const handoff = require('./lib/handoff');
+function reportChild(child, kind, text) {
+  try { return handoff.reportToParent(store, child, { kind, text }, { record, unread: chatEnded, emitRow: (project, task, row) => chats.emit(project, task, { type: 'row', row }) }); }
+  catch (e) { console.log(`[親への報告] ${e.message}`); return false; }
+}
+// 裏で動いている AI（チャットの AI が nohup などで起動した codex / claude / agy）。終わったら、その作業を未読にする
+const procwatch = require('./lib/procwatch').create({ projects: () => store.listProjects(), baseOf });
+procwatch.onChange((list, { removed }) => {
+  for (const x of removed) {
+    if (!x.project) continue;
+    let task = x.task;
+    if (!task) { try { task = store.listProjects().find(p => p.id === x.project)?.tasks.find(t => t.state !== '完了')?.id; } catch (e) { task = null; } }
+    if (!task) continue;
+    setUnread(x.project, task, true);
+    record('bgended', { project: x.project, task, ai: x.ai }, { pid: x.pid });
+  }
+});
+const gpt = new (require('./lib/chatgpt').Chatgpt)({ file: path.join(ROOT, '_hub', 'chatgpt.json'), store, chat, baseOf, record,
+  emitRow: (project, task, row) => chats.emit(project, task, { type: 'row', row }), ended: (project, task) => chatEnded(project, task) });
+
+const github = require('./lib/github').createGithub({ settingsFile: path.join(ROOT, '_hub', 'github.json'), dry: DRY,
+  idle: p => {
+    assertWorkspaceIdle(p, { workspaceMode: 'isolated' }, false, true);
+    const canonical = d => { try { return fs.realpathSync(d); } catch { return path.resolve(d); } };
+    const base = canonical(baseOf(p));
+    const all = store.listProjects();
+    const active = [...sessions.list().filter(s => s.running), ...[...chats.running.keys()].map(k => { const [project, task] = k.split('\u0000'); return { project, task }; }), ...procwatch.list()];
+    if (active.some(a => {
+      const q = all.find(x => x.id === a.project); if (!q || canonical(baseOf(q)) !== base) return false;
+      const t = q.tasks.find(x => x.id === a.task);
+      return !t || t.workspaceMode === 'direct' || !t.workdir || canonical(expandHome(t.workdir)) === base;
+    })) { const e = Error('同じ本体でAIが作業中です。終わってから作ってください'); e.status = 409; throw e; }
+  }
+});
+const githubProject = p => ({ ...p, base: baseOf(p) });
 function permCmd(ai) {
   const p = rolesData().permissions || {};
-  const v = ai === 'claude' ? p['claude-code'] : p.codex;
+  if (ai === 'agy') return launch.DEFAULT_CMD.agy;
+  const v = p[launch.AI_KEY[ai]];
   return typeof v === 'string' && /^(claude|codex)\b/.test(v) ? v : launch.DEFAULT_CMD[ai];
 }
 
 // 作業の役割 → いつもの担当（AI・モデル・思考）。作業ファイルに指定があればそちら
 function pickSpec(task, ai) {
+  if (ai === 'agy') return { model: launch.AGY_MODEL.label, effort: '高' };
   const data = rolesData();
   const r = data.roles.find(x => x.name === task.role);
-  const slot = r ? (r.main.ai === (ai === 'claude' ? 'claude-code' : 'codex') ? r.main : r.backup.ai === (ai === 'claude' ? 'claude-code' : 'codex') ? r.backup : null) : null;
+  const slot = r ? (r.main.ai === (launch.AI_KEY[ai]) ? r.main : r.backup.ai === (launch.AI_KEY[ai]) ? r.backup : null) : null;
   // 作業に指定があれば、候補から消えていても別のモデルへ置き換えない。
-  const model = task.model || (slot && slot.model) || '';
+  const model = launch.modelLabel(ai, task.model || (slot && slot.model) || '');
   const effort = roles.EFFORTS.includes(task.effort) ? task.effort : (slot && slot.effort) || '';
   return { model, effort };
 }
 
 function modelError(ai, model) {
+  model = launch.modelLabel(ai, model);
+  if (ai === 'agy') {
+    const route = launch.agyAccountError();
+    if (route) return route;
+    if (launch.flagFor(ai, model) !== launch.AGY_MODEL.id) return 'Agy で承認されているモデルは Gemini 3.1 Pro (High) だけです';
+    if (!aiTools.catalog().agy.models.some(x => x.id === launch.AGY_MODEL.id)) return '設定画面で Agy のモデル一覧を再取得してください。別のモデルへは切り替えません';
+  }
   if (!model) return '';
   if (aiTools.staleModel(ai, model)) return `モデル「${model}」は現在の候補から外れています。新しいモデルを選んでください`;
   if (Object.prototype.hasOwnProperty.call(launch.getOverrides()[ai] || {}, model)) return '';
@@ -175,33 +355,96 @@ function baseOf(p) {
   const d = body && expandHome(body.path);
   return d && fs.existsSync(d) ? d : p.dir;
 }
+function assertWorkspaceIdle(p, t, permitChat, githubOperation = false) {
+  if (maintenance.locked(p.id)) {const e=Error('同じ本体で検証中です。終わってからAIを始めてください');e.status=409;throw e;}
+  if (!githubOperation) github.assertStart(githubProject(p), { ...t, workdir: expandHome(t.workdir) });
+  const canonical = dir => { try { return fs.realpathSync(dir); } catch(e) { return path.resolve(dir); } };
+  const base = canonical(baseOf(p));
+  const targetDirect = t.workspaceMode === 'direct';
+  const active = [...sessions.list().filter(s=>s.running), ...[...chats.running.keys()].map(k=>{const [project,task]=k.split('\u0000');return {project,task,chat:true};})];
+  if (!active.length) return;
+  const all = store.listProjects();
+  for (const a of active) {
+    if (permitChat && a.chat && a.project===p.id && a.task===t.id) continue;
+    const q=all.find(x=>x.id===a.project), at=q?.tasks.find(x=>x.id===a.task); if(!q || !at)continue;
+    if(canonical(baseOf(q))===base && (targetDirect || at.workspaceMode==='direct')) {
+      const e=Error('同じ本体でAIが作業中です。本体での同時作業はできません');e.status=409;throw e;
+    }
+  }
+}
 function workDir(p, t) {
   const wd = expandHome(t.workdir);
   if (wd && fs.existsSync(wd)) return { dir: wd };
   const base = baseOf(p);
   if (DRY) return { dir: base };
   try {
-    const r = gitw.prepare({ base, workRoot: workRoot(p), taskId: t.id, direct: base === p.dir });
+    const r = gitw.prepare({ base, workRoot: workRoot(p), taskId: t.id, direct: t.workspaceMode === 'direct' || base === p.dir });
     if (r.worktree) store.updateTask(p.id, t.id, { workdir: r.dir });
     return r;
   } catch (e) {
     return { dir: base, note: `作業用コピーを作れなかったため、本体で作業します（${String(e.message || e).split('\n')[0]}）` };
   }
 }
+function startDir(p,t,permitChat=false) {
+  assertWorkspaceIdle(p,t,permitChat);
+  const result=workDir(p,t);
+  if(!t.workspaceStarted)store.updateTask(p.id,t.id,{workspaceStarted:new Date().toISOString()});
+  return result;
+}
 const inWork = (p, t) => { const wd = expandHome(t.workdir); const rel = wd && path.relative(workRoot(p), wd); return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel); };
+// 作業ファイルに作業用コピーの場所が書いてあるのに、その場所が無い（取り込んでゴミ箱へ移した後に、AI が古い内容で書き戻した時など）
+const copyMissing = (p, t) => inWork(p, t) && !fs.existsSync(expandHome(t.workdir));
+// この作業を本体に取り込んだ記録（いちばん新しいもの）
+const lastMerge = (project, task) => require('./lib/integration-log').lastMerge(LOG_FILE, project, task);
 
+const taskTransfer = new (require('./lib/task-transfer').TaskTransfer)({store,removal,baseOf,
+  integration:(p,t)=>gitw.integrationReceipt(baseOf(p),lastMerge(p.id,t.id),t),
+  notify:(project,task,id)=>{const p=store.readProject(project);const row=p&&chat.read(p.dir,task).find(x=>x.handoff===id||x.offer===id);if(row)chats.emit(project,task,{type:'row',row});chatEnded(project,task);}
+});
+const taskIntegrate = new (require('./lib/task-integrate').TaskIntegrate)({store,transfer:taskTransfer,removal,baseOf});
+
+// iPhone で開くアドレス（Tailscale の Mac の名前）。tailscale が無い・止まっている時は空。1分は覚えておく
+let tsCache = { at: 0, url: '' };
+function tailscaleUrl() {
+  if (Date.now() - tsCache.at < 60000) return Promise.resolve(tsCache.url);
+  const { execFile } = require('child_process');
+  const bins = ['tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale', '/opt/homebrew/bin/tailscale', '/usr/local/bin/tailscale'];
+  const tryAt = i => new Promise(done => {
+    if (i >= bins.length) return done('');
+    execFile(bins[i], ['status', '--json'], { timeout: 3000, maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
+      if (err) return tryAt(i + 1).then(done);
+      try { const dns = String(JSON.parse(out).Self.DNSName || '').replace(/\.$/, ''); done(dns ? 'https://' + dns : ''); } catch (e) { done(''); }
+    });
+  });
+  return tryAt(0).then(u => { tsCache = { at: Date.now(), url: u }; return u; });
+}
+// 別の AI に作業を渡す時の決まり（AI が裏で codex/claude を起動すると Hub に見えず、画面では終わったことになるため）
+const CHAT_DELEGATE_NOTE = 'この委任APIは会話画面からだけ使えます。委任が「この作業のターミナルで AI が動いています」と断られた時だけ、人に次のように頼む：「この作業の作業画面で［ターミナル］に切り替え、動いている AI の欄の［停止］を押してから、もう一度この会話で頼んでください」。断られていない時は、ターミナルの停止や終了を人に頼まない。裏で別のCLIを起動したり、この依頼を繰り返し送ったりしないでください。';
+const TERMINAL_LIMIT_NOTE = 'ターミナルでは自動の引き継ぎは無い。上限で止まったら、渡す内容を作業ファイルに書いて返事を終える。人が［会話］から依頼を送った番で Fable の正式な上限が確認された時は、上の決まりで引き継がれる。';
+const TERMINAL_HANDOFF_NOTE = 'あなたはターミナルで動いている。ここからは別の AI に委任できない。渡したい時は、渡す内容と指定モデルを作業ファイルに書いて返事を終える。人には「この作業の作業画面で［会話］に切り替えて、記録した依頼を送ってください」とだけ案内する。ターミナルを止める操作は頼まない（会話から送った依頼が断られた時に、会話側の AI が案内する）。';
+const DELEGATE_COMPLETED_ERROR = 'この作業は完了済みのため委任できません。続ける場合は、人がこの作業の作業画面の上部の［再開する］を押してから依頼してください。新しい作業は作っていません';
+function delegateRule(p, t) {
+  const ids = p && t ? `"project":"${p.id}","task":"${t.id}"` : '"project":"<プロジェクトID>","task":"<作業ID>"';
+  return `【別の AI に作業を渡す時】自分で codex / claude / agy を裏で起動しない。${CHAT_DELEGATE_NOTE} 会話画面で渡す時は Hub を使う：curl -s -X POST http://127.0.0.1:${PORT}/api/delegate -H 'X-Hub: 1' -H 'Content-Type: application/json' -d '{${ids},"ai":"codex","model":"gpt-6.1-sol","title":"短い名前","text":"頼む内容（必要な背景も）"}'。ai は codex / claude / agy。model は依頼文の中だけでなく、この欄で必ず指定する（チェックは ai: claude・model: claude-fable-5-1、文章・調査・デザインは claude-opus-5-5）。Hub は同じ作業の会話で担当 AI を切り替え、今の AI が動いている間は順番待ちにする。子作業は作らない。画面に順番待ち・作業中と出て、結果もこの会話に残る。相手に「実際のモデルを確かめて違えば止まれ」と書かない。モデルは model 欄で Hub が起動設定として保証する（実際のモデルの証明ではない）。モデル名を返させる時は「起動設定のモデル名」と頼む。上記の自動交代が有効な時は、Fable が上限なら Hub が Astra に引き継ぐので、自分で別のモデルへ委任し直さない。渡したらこの番を終えること。\n【プロジェクトや作業を増やさない】新しいプロジェクト・子プロジェクト・作業ファイル（.ai/tasks）を自分で作らない。分ける必要がある時は、人に提案して決めてもらう。やっていない手順に [x] を付けない。`;
+}
 // 人が決めた役割とモデル（roles.yaml）。AI が他のファイル（エージェントの設定など）の古い指定に従わないよう、毎回伝える
-function modelPolicy() {
+function modelPolicy(p, t, where = 'chat', projects) {
+  // startDir が保存したコピーの場所・手順なども、同じ台帳の最新値で渡す。
+  const current = store.readProject(p.id);
+  if (current) { p = current; t = current.tasks.find(x => x.id === t.id) || t; }
   const d = rolesData();
-  const label = s => (s.ai === 'claude-code' ? 'Claude Code' : 'Codex');
-  const slot = s => { if (!s || s.ai === '人' || !s.model) return ''; const f = launch.flagFor(s.ai === 'claude-code' ? 'claude' : 'codex', s.model); return `${label(s)}・${s.model}${f ? `（${f}）` : ''}`; };
+  const label = s => (launch.AI_LABEL[s.ai === 'claude-code' ? 'claude' : s.ai] || s.ai);
+  const slot = s => { if (!s || s.ai === '人' || !s.model) return ''; const f = launch.flagFor(s.ai === 'claude-code' ? 'claude' : s.ai, s.model); return `${label(s)}・${s.model}${f ? `（${f}）` : ''}`; };
+  const limitPolicy = fableBackup(d) ? '【利用上限の時】司令塔・チェックの Fable 5.1 が利用上限で止まった時だけ、Hub が同じ作業で Codex・GPT-6-Astra に自動で引き継ぐ（人の決まり、会話画面のみ）。上限かどうかは Hub が CLI のエラー構造と正式な上限文で判断し、プロセス終了後に交代する。保持中は解除日時または手動解除までHubがAstraで開始。AIは確認不要。あなたは本文の「上限」という言葉や過去の引用で担当を変えない・止まらない。人の決めた担当モデル（main）は変わらない。引き継ぎで始まった番は、済んだ部分を繰り返さず残りを続ける。' : '【利用上限の時】現在は自動交代がオフ、または司令塔・チェックの Fable から Astra への予備担当が設定されていない。自分で別のモデルへ切り替えない。';
   const list = d.roles.map(r => slot(r.main) ? `${r.name}＝${slot(r.main)}` : '').filter(Boolean).join('、');
-  return `【モデルの決まり（人が決めた。他のファイルや前の指示より優先）】${list}。claude-opus-4-6 などの古いモデルは使わない。エージェント（紬・律など）に頼む時も、この決まりのモデルを指定すること。`;
+  return `【モデルの決まり（人が決めた。他のファイルや前の指示より優先）】${list}。人が Agy CLI を手動選択した依頼に限り Gemini 3.1 Pro (High)（gemini-3.1-pro-high）を使ってよい。既定の役割は変更しない。claude-opus-4-6 などの古いモデルは使わない。エージェント（紬・律など）に頼む時も、この決まりのモデルを指定すること。\n${limitPolicy}\n${delegateRule(p, t)}\n\n${guidance(p, t, { where, projects: projects || (t.kind === 'derived' && t.derivedFrom?.includes('/') && !t.derivedFrom.startsWith(p.id + '/') ? store.listProjects() : [p]), copy: inWork(p, t) && !copyMissing(p, t), copyMissing: copyMissing(p, t) })}`;
 }
 
-function taskPrompt(p, t, file, dir) {
+function taskPrompt(p, t, file, dir, where = 'chat', startup) {
+  const issuesRule = `【問題点を短くまとめる決まり】PROJECT.md の issues を足す・変える時は、同じプロジェクトの .ai/issues-summary.json も更新する（他プロジェクトには書かない）。保存形式は {"items":[{"hash":"原文のsha256先頭16文字","title":"30字までの問題名","state":"未解決/確認待ち/判断待ち/解決済み/履歴のいずれか","next":"50字までの次の対応（無ければ空）","who":"人/AI/空のいずれか"}]}。原文は文字列ならそのまま、オブジェクトなら text。hash は Node の require('node:crypto').createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16) で計算する（text は原文そのもの。空白・改行を変えない）。問題名と次の対応に作業ID・commit・テスト件数を入れない。新しい状態の項目を足したら、同じ件の古い項目は「履歴」にする。確かめていない事は「確認待ち」にし、不具合・解決と断定しない。原文は消さない。`;
   const rel = dir && path.relative(workRoot(p), dir);
-  const copy = rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? `今いるフォルダ（${dir}）はこの作業専用の作業用コピー。ここだけで作業し、本体には触らないこと（取り込みは人が Hub で行う）。` : '';
+  const copy = rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? `今いるフォルダ（${dir}）はこの作業専用の作業用コピー。ここだけで作業し、本体には触らないこと（取り込みは人が作業画面の［本体に取り込む］で行う）。`
+    : dir ? `今いるフォルダ（${dir}）は本体。この作業は作業用コピーを使わず、ここで作業してよい（Hub が本体で作業すると決めた。作業ルールに「作業用コピーの中だけ」とあっても、この作業では本体に保存してよい。作業用コピーを作るよう人に頼まない）。` : '';
   const refs = p.folders.filter(f => /^参考/.test(f.label)).map(f => expandHome(f.path));
   let projects;
   const rels = p.related.map(r => {
@@ -210,8 +453,24 @@ function taskPrompt(p, t, file, dir) {
     projects ||= store.listProjects();
     return projects.find(x => x.name === r)?.dir;
   }).filter(Boolean);
+  const { family, sourceOf } = require('./lib/work-context');
+  const all = projects ||= store.listProjects(), same = family(p, all);
+  const source = sourceOf(p,t.derivedFrom,all);
+  const sameRefs = same.filter(q=>q.id!==p.id).map(q=>q.dir);
+  const context = `この作業は${t.kind === 'derived' ? '派生作業' : '本作業'}。${source ? '派生元の作業ファイル: ' + store.taskFile(source.project.id,source.task.id) + '。' : ''}${sameRefs.length ? '同じ大きなプロジェクト内の参照（読むだけ）: '+sameRefs.join(' / ')+'。' : ''}`;
   const look = refs.length || rels.length ? `参考にしてよい場所（読むだけ。書き換えない）: ${[...refs, ...rels].join(' / ')}。` : '';
-  return modelPolicy() + copy + look + `作業ID ${t.id}（${t.title}）の続きをしてください。まず次の3つを読むこと: ${path.join(p.dir, '.ai', 'rules.md')} / ${path.join(p.dir, 'PROJECT.md')} / ${file}。区切りごとに作業ファイルを更新し、「## 手順」の終わった所を [x] にすること（手順が無ければ3〜5個書く）。`;
+  if (where !== 'terminal') {
+    const read = `作業「${String(t.title).replace(/[\r\n]+/g, ' ')}」（作業ID ${t.id}）の続きを。読む：台帳/.ai/rules.md・台帳/PROJECT.md・台帳/.ai/tasks/${t.id}.md。区切りで更新、実施した手順だけ[x]（無ければ3〜5個）。workdir・state・questionは書き換えない（Hub管理）。`;
+    return instructions.packet({ pdir: p.dir, project: p.id, task: t.id, policy: modelPolicy(p, t, where, all), issues: issuesRule, port: PORT, contextRule: launch.CONTEXT_RULE, askRule: chat.ASK_RULE,
+      common: [dir ? `cwd=${dir === p.dir ? '台帳' : '台帳/' + path.relative(p.dir, dir).split(path.sep).join('/')}。${rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? '専用の作業用コピー。ここだけで作業。本体には触らない（取り込みは人の［本体に取り込む］）。' : '本体。コピーは使わず、ここで作業してよい（Hub指定）。'}` : '', look, context, read].filter(Boolean).join('\n') });
+  }
+  return [modelPolicy(p, t, where, all), where === 'terminal' ? TERMINAL_HANDOFF_NOTE + '\n' + TERMINAL_LIMIT_NOTE : '', where === 'terminal' && startup ? launch.startupInfo(startup.ai, startup.model) : '', launch.CONTEXT_RULE, copy, look, context, issuesRule, `作業「${String(t.title).replace(/[\r\n]+/g, ' ')}」（作業ID ${t.id}）の続きをしてください。まず次の3つを読むこと: ${path.join(p.dir, '.ai', 'rules.md')} / ${path.join(p.dir, 'PROJECT.md')} / ${file}。区切りごとに作業ファイルを更新し、「## 手順」の終わった所を [x] にすること（手順が無ければ3〜5個書く）。作業ファイルの先頭の workdir・state・question の行は Hub が管理する：書き換えない（特に、取り込み済みの後に古い内容で書き戻さない）。`].filter(Boolean).join('\n\n');
+}
+
+function usageWithLimit(snapshot) {
+  // 表示も開始前の共通判定から作る。旧fable-limit.jsonは読まず変更もしない。
+  const state = fableBackup(rolesData()) && limitEvidence.active();
+  return { ...snapshot, fableLimit: state ? { model: 'claude-fable-5-1', at: state.at, until: state.validUntil, untilSource: state.untilSource, hold: true } : null };
 }
 
 async function api(req, res, url) {
@@ -228,31 +487,74 @@ async function api(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/state') {
     const t0 = Date.now();
     res.on('finish', () => { const ms = Date.now() - t0; if (ms > 2000) console.log(`[遅い] 一覧を作るのに ${ms}ms かかりました（台帳のファイルの読み込みが遅い可能性）`); });
-    const roleData = rolesData();
-    return send(res, 200, {
+    const roleData = rolesData(), modelSettings = modelView.read(), initialPick = modelView.initial(modelSettings);
+    pruneUnread(); // 起動前から残っていた通知・外で片付けられた作業にも対応する。
+    // 画面で使う物だけ送る：作業の「やったこと」「注意」「メモ」の本文は送らず、「次にやること」は1行目だけ（1MB → 数百KB）
+    const slim = t => { const { done, note, memo, next, ...rest } = t; return { ...rest, next: String(next || '').split('\n')[0] }; };
+    const state = {
       root: ROOT, roles: roleData, version: VERSION, latest: readVersion(),
-      cliFlags: Object.fromEntries(['claude', 'codex'].map(ai => [ai, Object.fromEntries((roleData.models[ai === 'claude' ? 'claude-code' : 'codex'] || []).map(m => [m, launch.flagFor(ai, m)]))])),
-      projects: store.listProjects().map(p => ({ ...p, copies: gitw.countCopies(workRoot(p)), tasks: p.tasks.map(t => ({ ...t, copy: inWork(p, t) })) })),
+      github: github.summary(),
+      completionWarning: store.completion.warning, projectOrder: projectOrder.read(), projectPins: projectOrder.readPins(),
+      taskHandoffs: taskTransfer.pending(),
+      taskOffers: taskTransfer.offers(), taskIntegrations: taskIntegrate.pending(),
+      cliFlags: Object.fromEntries(launch.AIS.map(ai => [ai, Object.fromEntries((roleData.models[launch.AI_KEY[ai]] || []).map(m => [m, launch.flagFor(ai, m)]))])),
+      // github：origin の場所と今のブランチ（120秒覚えておく）。作業は作業用コピーがある物だけ（ブランチが別のため）
+      projects: (all => { const kids = handoff.childCounts(all); return all.map(p => {
+        const base = baseOf(p);
+        return { ...p, children: kids[p.id], startSpec: start.lastSpec(p), copies: gitw.countCopies(workRoot(p)), githubHasOrigin: gitw.hasOrigin(base), github: gitw.remoteInfo(base), tasks: p.tasks.map(t => {
+          const missing = copyMissing(p, t);
+          return { ...slim(t), copy: inWork(p, t) && !missing, copyMissing: missing, ...(t.workdir && !missing ? { github: gitw.remoteInfo(expandHome(t.workdir)) } : {}) };
+        }) };
+      }); })(store.listProjects()),
       sessions: sessions.list(), terminal: sessions.available(),
       chatting: [...chats.running.entries()].map(([k, r]) => { const [project, task] = k.split('\u0000'); return { project, task, ai: r.ai, model: r.model }; }),
-      efforts: roles.EFFORTS, hiddenModels: hiddenModels(),
-    });
+      initialPick, initialPickError: modelError(initialPick.ai, initialPick.model),
+      efforts: roles.EFFORTS, hiddenModels: modelView.hidden(modelSettings), modelOrder: modelView.saved(modelSettings), phoneLabels: modelView.phone(modelSettings),
+      unread: [...unread].map(k => { const [project, task] = k.split('\u0000'); return { project, task }; }),
+      background: procwatch.list().filter(x => x.project),
+      remote: { enabled: remote.enabled() }, chatgpt: gpt.settings(), hubDir: __dirname,
+      agyAvailable: Boolean(aiTools.find('agy') && aiTools.catalog().agy.models.some(x => x.id === launch.AGY_MODEL.id) && !launch.agyAccountError()),
+    };
+    // 変わっていなければ中身を送らない（304）。画面は15秒ごとに聞いてくるので、何も変わらない時はほぼ空の返事で済む
+    // 止まっている秒数（quiet）は毎秒変わるので印には入れない（画面は別に /api/sessions で取る）
+    const body = JSON.stringify(state);
+    const tagBody = state.sessions.length ? JSON.stringify({ ...state, sessions: state.sessions.map(({ quiet, ...x }) => x) }) : body;
+    const tag = `"${crypto.createHash('sha1').update(tagBody).digest('hex').slice(0, 20)}"`;
+    if (req.headers['if-none-match'] === tag) { res.writeHead(304, { ETag: tag, 'Cache-Control': 'no-store' }); return res.end(); }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ETag: tag });
+    return res.end(body);
   }
+  // 裏で動いている AI の全部（どのプロジェクトにも当たらない物も含む）
+  if (req.method === 'GET' && url.pathname === '/api/background') return send(res, 200, { items: procwatch.list() });
   if (req.method === 'GET' && url.pathname === '/api/ai-tools') {
     const status = await aiTools.status();
     applyModelCatalog();
     return send(res, 200, status);
   }
+  if (req.method === 'GET' && url.pathname === '/api/usage') {
+    const origin = req.headers.origin;
+    if (req.headers['x-hub'] !== '1' || origin && ![`http://127.0.0.1:${PORT}`,`http://localhost:${PORT}`].includes(origin)) return send(res,403,{ error:'forbidden' });
+    return send(res, 200, usageWithLimit(await usage.status()));
+  }
+  if (req.method === 'POST' && url.pathname === '/api/limits/fable/clear') {
+    try { limitEvidence.clear(); }
+    catch { return send(res, 500, { error: '解除を保存できませんでした' }); }
+    record('limit-clear', {});
+    // 解除に利用枠の取得を待たせない。遅れて届く応答もフラグを作らない。
+    return send(res, 200, usageWithLimit(usage.snapshot()));
+  }
+  if (req.method === 'POST' && url.pathname === '/api/usage/refresh') return send(res, 200, usageWithLimit(await usage.status(true)));
 
   // 会話画面：今までの会話と、書いている途中の返事を流す
   if (req.method === 'GET' && url.pathname === '/api/chat/stream') {
     const project = url.searchParams.get('project'), task = url.searchParams.get('task');
     const p = store.readProject(project);
     if (!p || !store.taskFile(project, task)) return send(res, 404, { error: '作業が見つかりません' });
+    setUnread(project, task, false); // 開いたので読んだことにする
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
     const emit = ev => res.write(`data: ${JSON.stringify(ev)}\n\n`);
     const run = chats.busy(project, task);
-    emit({ type: 'rows', rows: chat.read(p.dir, task), busy: run ? { ai: run.ai, model: run.model, text: run.texts.join('\n\n'), started: run.started, last: run.last } : null, queue: chats.queue(project, task) });
+    emit({ type: 'rows', rows: chat.read(p.dir, task), busy: run ? { ai: run.ai, model: run.model, text: run.texts.join(run.ai === 'agy' ? '' : '\n\n'), started: run.started, last: run.last } : null, queue: chats.queue(project, task) });
     const off = chats.watch(project, task, emit);
     const ping = setInterval(() => res.write(': ping\n\n'), 20000);
     req.on('close', () => { off(); clearInterval(ping); });
@@ -260,9 +562,24 @@ async function api(req, res, url) {
   }
   if (req.method === 'GET' && url.pathname === '/api/cli-models') {
     const m = rolesData().models;
-    const rows = ai => (m[ai === 'claude' ? 'claude-code' : 'codex'] || []).map(name => ({ name, flag: launch.flagFor(ai, name), set: Object.prototype.hasOwnProperty.call(launch.getOverrides()[ai] || {}, name) }));
-    return send(res, 200, { claude: rows('claude'), codex: rows('codex'), hints: cliModelHints() });
+    const rows = ai => (m[launch.AI_KEY[ai]] || []).map(name => ({ name, flag: launch.flagFor(ai, name), set: Object.prototype.hasOwnProperty.call(launch.getOverrides()[ai] || {}, name) }));
+    return send(res, 200, { claude: rows('claude'), codex: rows('codex'), agy: rows('agy'), hints: cliModelHints() });
   }
+  // ChatGPT の道具（mcp.js から）。X-Hub の印がある物だけ
+  if (url.pathname.startsWith('/api/mcp/')) {
+    if (req.headers['x-hub'] !== '1') return send(res, 403, { error: 'forbidden' });
+    if (req.method === 'GET' && url.pathname === '/api/mcp/tools') return send(res, 200, { tools: gpt.tools(), work: gpt.settings().work });
+    if (req.method === 'POST' && url.pathname === '/api/mcp/call') {
+      const b = await readBody(req);
+      try { const r = await gpt.call(String(b.name || ''), b.arguments && typeof b.arguments === 'object' ? b.arguments : {}); return send(res, 200, { text: typeof r === 'string' ? r : JSON.stringify(r, null, 2) }); }
+      catch (e) { return send(res, e.status || 500, { error: String(e.message || e), unknown: e.status === 404 && /^その道具/.test(e.message) }); }
+    }
+    return send(res, 404, { error: 'not found' });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/github') return send(res, 200, { ...await github.status({ fresh: url.searchParams.get('fresh') === '1' }), settings: github.settings() });
+  if (req.method === 'GET' && url.pathname === '/api/chatgpt') return send(res, 200, { ...gpt.settings(), ...codexMcpStatus() });
+  // 外から使う（iPhone）の設定
+  if (req.method === 'GET' && url.pathname === '/api/remote') { const st = remote.status(); return (st.url ? Promise.resolve(st.url) : tailscaleUrl()).then(u => send(res, 200, { ...st, url: u })); }
   if (req.method === 'GET' && url.pathname === '/api/version') return send(res, 200, { version: VERSION, latest: readVersion() });
   if (req.method === 'GET' && url.pathname === '/api/changelog') return send(res, 200, changelog(12));
   if (req.method === 'GET' && url.pathname === '/api/sessions') return send(res, 200, sessions.list());
@@ -284,6 +601,7 @@ async function api(req, res, url) {
     const project = url.searchParams.get('project'), task = url.searchParams.get('task'), ai = url.searchParams.get('ai');
     const s = sessions.get(project, task, ai);
     if (!s) return send(res, 404, { error: '作業画面がありません' });
+    setUnread(project, task, false); // 開いたので読んだことにする
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
     const emit = ev => res.write(`data: ${JSON.stringify(ev)}\n\n`);
     emit({ type: 'data', data: s.buf, replay: true });
@@ -292,6 +610,30 @@ async function api(req, res, url) {
     const ping = setInterval(() => res.write(': ping\n\n'), 20000);
     req.on('close', () => { off(); clearInterval(ping); });
     return undefined;
+  }
+
+  // GitHub の場所（その場で読み直す）。作業に作業用コピーがあればそのブランチ
+  if (req.method === 'GET' && url.pathname === '/api/project/github') {
+    const p = store.readProject(url.searchParams.get('project'));
+    const task = url.searchParams.get('task');
+    const file = p && task ? store.taskFile(p.id, task) : null;
+    const wd = file ? expandHome(store.readTask(file).workdir) : '';
+    const info = p ? gitw.remoteInfo(wd && fs.existsSync(wd) ? wd : baseOf(p), { fresh: true }) : null;
+    return info ? send(res, 200, info) : send(res, 404, { error: 'GitHub の場所が見つかりません' });
+  }
+
+  // 子プロジェクトの一覧（親で作業を続ける前に、終わっていない子を知らせるため）
+  if (req.method === 'GET' && url.pathname === '/api/project/children') {
+    const r = handoff.childrenSummary(store, url.searchParams.get('project'));
+    return r ? send(res, 200, r) : send(res, 404, { error: 'プロジェクトが見つかりません' });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/start/image') {
+    const p = store.readProject(url.searchParams.get('project'));
+    try {
+      if (!p) throw Error('プロジェクトがありません');
+      const f = start.imageFile(p, url.searchParams.get('id'), true);
+      return send(res, 200, fs.readFileSync(f), /\.jpe?g$/i.test(f) ? 'image/jpeg' : 'image/png');
+    } catch { return send(res, 404, { error: '画像が見つかりません' }); }
   }
 
   if (req.method !== 'POST') return send(res, 405, { error: 'method' });
@@ -306,13 +648,141 @@ async function api(req, res, url) {
     try { data = await readRaw(req, MAX_UPLOAD); } catch (e) { return send(res, 413, { error: 'ファイルが大きすぎます（50MB まで）' }); }
     const saved = saveUpload(q('name'), data);
     store.updateTask(p.id, q('task'), { memo: `ファイルを渡した: ${saved}` });
-    const ai = ['claude', 'codex'].includes(q('ai')) ? q('ai') : '';
+    const ai = launch.AIS.includes(q('ai')) ? q('ai') : '';
     const typed = ai ? sessions.write(p.id, q('task'), ai, (/\s/.test(saved) ? `"${saved}"` : saved) + ' ') : false;
     record('upload', { project: p.id, task: q('task'), ai }, { file: saved, bytes: data.length });
     return send(res, 200, { ok: true, path: saved, typed });
   }
 
+  if (url.pathname === '/api/start/image') {
+    const p = store.readProject(url.searchParams.get('project'));
+    if (!p) { req.resume(); return send(res, 400, { error: 'プロジェクトがありません' }); }
+    try { return send(res, 200, start.saveImage(p, url.searchParams.get('name') || 'image.png', await readRaw(req, start.MAX))); }
+    catch (e) { return send(res, 400, { error: e.message }); }
+  }
+
   const b = await readBody(req);
+  if (url.pathname === '/api/github') return send(res, 200, await github.save(b));
+  if (url.pathname === '/api/github/owners') return send(res, 200, { owners: await github.owners(b.account) });
+  if (url.pathname === '/api/github/preview' || url.pathname === '/api/github/create') {
+    const p = store.readProject(b.project);
+    if (!p) return send(res, 404, { error: 'プロジェクトが見つかりません' });
+    if (url.pathname.endsWith('/preview')) return send(res, 200, await github.preview(githubProject(p)));
+    if (b.confirm !== true) return send(res, 400, { error: '確認画面で［作る］を押してください' });
+    const r = await github.create(githubProject(p), b);
+    record('githubcreate', { project: p.id }, { ok: r.ok, pushed: r.pushed, private: true, partial: Boolean(r.partial) });
+    return send(res, 200, r);
+  }
+  if (url.pathname === '/api/remote') {
+    const r = remote.update({ enabled: b.enabled, passcode: b.passcode });
+    if (r.error) return send(res, 400, { error: r.error });
+    record('remote', {}, { enabled: remote.enabled(), passcode: b.passcode !== undefined });
+    return send(res, 200, remote.status());
+  }
+  // ChatGPT に貼る文：普段の ChatGPT の会話は Mac の道具（MCP）を使えないので、作業の中身を文に入れる
+  if (url.pathname === '/api/chatgpt/prompt') {
+    const p = store.readProject(b.project), file = p && store.taskFile(b.project, b.task);
+    if (!file || !fs.existsSync(file)) return send(res, 400, { error: '作業が見つかりません' });
+    const cut = (v, n) => (v.length > n ? v.slice(0, n) + '\n…（長いので省略）' : v);
+    let ledger = ''; try { ledger = fs.readFileSync(path.join(p.dir, 'PROJECT.md'), 'utf8'); } catch (e) { /* 無くてもよい */ }
+    const rows = chat.read(p.dir, b.task).filter(r => (r.role === 'user' || r.role === 'assistant') && r.text).slice(-6);
+    const talk = rows.map(r => `[${r.role === 'user' ? (r.from ? '結果' : '人') : (launch.AI_LABEL[r.ai] || r.ai || 'AI')}] ${cut(r.text, 1500)}`).join('\n\n');
+    const text = typeof b.text === 'string' ? b.text.trim() : '';
+    const out = [`Project Hub の作業「${b.task}」をお願いします。必要な中身は下に全部入れてあります（道具やファイルを探す必要はありません）。相談・レビュー役として、日本語で答えてください。最後に「## 結果」と「## 次にやること」を短くまとめてください。人に決めてほしいことがあれば「## 質問」に書いてください。`,
+      `# 作業ファイル\n${cut(fs.readFileSync(file, 'utf8'), 12000)}`,
+      ledger && `# 台帳（PROJECT.md）\n${cut(ledger, 4000)}`,
+      talk && `# これまでの会話（新しい6件）\n${talk}`,
+      text && `# 今回の依頼\n${text}`].filter(Boolean).join('\n\n');
+    return send(res, 200, { ok: true, text: out });
+  }
+  // ChatGPT の返事を貼って Hub に戻す（会話に ChatGPT の返事として残し、作業ファイルに1行書く）
+  if (url.pathname === '/api/chatgpt/result') {
+    const p = store.readProject(b.project), file = p && store.taskFile(b.project, b.task);
+    const text = typeof b.text === 'string' ? b.text.trim() : '';
+    if (!file || !fs.existsSync(file) || !text || text.length > 50000) return send(res, 400, { error: '作業と返事を確かめてください' });
+    const row = chat.append(p.dir, b.task, { role: 'assistant', ai: 'chatgpt', text });
+    chats.emit(p.id, b.task, { type: 'row', row });
+    try { store.appendSection(p.id, b.task, 'やったこと', `- ${new Date().toISOString().slice(0, 16).replace('T', ' ')} ChatGPT の返事を受け取った（会話に記録）`); } catch (e) { /* 無くてもよい */ }
+    return send(res, 200, { ok: true });
+  }
+  // ChatGPT アプリ（中身は Codex）に Hub の道具を登録する：~/.codex/config.toml に [mcp_servers.project-hub] を書き足す
+  if (url.pathname === '/api/chatgpt/register') {
+    const r = codexMcpRegister();
+    if (r.error) return send(res, 400, { error: r.error });
+    record('chatgptregister', {}, { file: r.file, added: r.added });
+    return send(res, 200, { ...gpt.settings(), ...codexMcpStatus(), ...r });
+  }
+  if (url.pathname === '/api/chatgpt') {
+    if (typeof b.work !== 'boolean') return send(res, 400, { error: '形式が違います' });
+    const s = gpt.save({ work: b.work }); record('chatgptwork', {}, { work: s.work });
+    return send(res, 200, s);
+  }
+  if (url.pathname === '/api/remote/logout-all') {
+    const n = remote.logoutAll();
+    record('remotelogoutall', {}, { sessions: n });
+    return send(res, 200, remote.status());
+  }
+  if (url.pathname === '/api/start/image-path') {
+    const p = store.readProject(b.project);
+    try { if (!p) throw Error('プロジェクトがありません'); return send(res, 200, start.imageFromPath(p, b.path)); }
+    catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (url.pathname === '/api/start') {
+    const p = store.readProject(b.project), text = String(b.text || '').trim();
+    const ai = b.ai === 'claude-code' ? 'claude' : b.ai;
+    const agents = new Set([...rolesData().agents, ...store.listProjects().flatMap(x => x.tasks.map(t => t.owner).filter(o => o && !/claude|codex|agy|^chatgpt$|^(人|あなた)$/i.test(o)).map(o => o.replace(/^discord:\s*/i, '')))]);
+    const agent = typeof ai === 'string' && ai.startsWith('discord:') && agents.has(ai.slice(8));
+    if (!p || (!text && !(b.images || []).length) || (!launch.AIS.includes(ai) && !agent)) return send(res, 400, { error: '依頼と担当を確認してください' });
+    if (text.length > 4000 || !Array.isArray(b.images) || b.images.length > 10) return send(res, 400, { error: '依頼は4000文字、画像は10枚までです' });
+    if (!agent && aiTools.isOperating()) return send(res, 409, { error: 'AI の更新・モデル再取得が進行中です' });
+    const ph = p.phases.find(x => x.state !== '完了');
+    const spec = agent ? { model: '', effort: '' } : pickSpec({ role: ph?.role, model: b.model, effort: b.effort }, ai);
+    const invalid = !agent && modelError(ai, spec.model);
+    if (invalid) return send(res, 409, { error: invalid });
+    const receiptFile = path.join(p.dir, '.ai', 'start-request.json');
+    let receipt; try { receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8')); } catch { /* 初回 */ }
+    if (b.request && receipt?.request === b.request && receipt.result) return send(res, 200, receipt.result);
+    const writeReceipt = value => { if (b.request) { fs.mkdirSync(path.dirname(receiptFile), { recursive: true }); fs.writeFileSync(receiptFile, JSON.stringify({ request: b.request, ...value })); } };
+    let t;
+    try {
+      for (const id of b.images) if (!fs.existsSync(start.imageFile(p, id))) throw Error('添付画像が見つかりません');
+      // 途中で失敗しても同じ作業を再開し、重複作成を防ぐ。
+      if (b.request && receipt?.request === b.request) b.task = receipt.task;
+      t = b.task && store.taskFile(p.id, b.task) ? store.readTask(store.taskFile(p.id, b.task)) : null;
+      if (t && chats.busy(p.id, t.id)) throw Error('この作業はすでに始まっています');
+      t ||= store.createTask(p.id, { title: (text.split('\n')[0] || '画像を確認する').slice(0, 40), owner: agent ? ai : launch.AI_KEY[ai], role: ph?.role || '', phase: ph?.name || '' });
+      writeReceipt({ task: t.id });
+      const { dir, note } = startDir(p, t);
+      const images = start.copyImages(p, b.images, dir, t.id);
+      store.updateTask(p.id, t.id, { owner: agent ? ai : launch.AI_KEY[ai], ...spec });
+      const prompt = start.imagePrompt(ai, text || '添付画像を確認してください。', images);
+      const file = store.taskFile(p.id, t.id);
+      if (agent) {
+        const notice = 'Discordへの自動送信は未対応です。依頼文と画像の場所を保存しました。Discordで担当へ渡してください。';
+        store.updateTask(p.id, t.id, { state: '返事待ち', question: notice, memo: prompt });
+        chat.append(p.dir, t.id, { role: 'user', to: ai, text: prompt });
+      } else {
+        const basePrompt = taskPrompt(p, t, file, dir);
+        const turn = { request: b.request, role: t.role, project: p.id, task: t.id, pdir: p.dir, dir, ai, ...spec, text: prompt, images, basePrompt, policy: modelPolicy(p, t), perm: permCmd(ai), onEnd: row => {
+          if (row.asks?.length) store.updateTask(p.id, t.id, { state: '返事待ち', question: row.asks.map(a => a.question).join(' / ').slice(0, 300) });
+          chatEnded(p.id, t.id);
+        } };
+        if (!DRY && !(await chats.send(turn).started)) throw Error('AIを起動できませんでした。CLIの導入状態を確認してください');
+        store.updateTask(p.id, t.id, { state: '実行中', question: '', memo: images.length ? '参照画像: ' + images.join(' / ') : '' });
+        if (DRY) t.turn = chat.buildTurn({ ...turn, rows: [], meta: {} });
+      }
+      start.saveSpec(p, { ai, ...spec });
+      record('quickstart', { project: p.id, task: t.id, ai }, { ...spec, images });
+      const result = { ok: true, task: t.id, agent, note, images, ...(DRY ? { dry: true, turn: t.turn } : {}) };
+      writeReceipt({ task: t.id, result });
+      return send(res, 200, result);
+    } catch (e) { return send(res, 409, { error: e.message, task: t?.id }); }
+  }
+
+  if (url.pathname === '/api/ai-tools/check') {
+    try { return send(res, 200, await aiTools.checkUpdate(b.ai)); }
+    catch (e) { return send(res, e.status || 502, { error: e.reason || '更新情報の確認に失敗しました', stage: e.stage }); }
+  }
   if (url.pathname === '/api/ai-tools/update' || url.pathname === '/api/ai-tools/models/refresh') {
     try {
       const result = url.pathname.endsWith('/update') ? await aiTools.update(b.ai) : await aiTools.refresh(b.ai);
@@ -331,21 +801,21 @@ async function api(req, res, url) {
   if (url.pathname === '/api/term/start') {
     const p = store.readProject(b.project);
     const file = store.taskFile(b.project, b.task);
-    if (!p || !file || !['claude', 'codex'].includes(b.ai)) return send(res, 400, { error: '作業が見つかりません' });
+    if (!p || !file || !launch.AIS.includes(b.ai)) return send(res, 400, { error: '作業が見つかりません' });
     const t = store.readTask(file);
     const { model, effort } = pickSpec(t, b.ai);
     const invalidModel = modelError(b.ai, model);
     if (invalidModel) return send(res, 409, { error: invalidModel });
     const cur = sessions.get(b.project, b.task, b.ai);
-    const { dir, note } = cur && !cur.exited ? { dir: cur.dir } : workDir(p, t);
-    const argv = launch.buildArgv({ ai: b.ai, prompt: taskPrompt(p, t, file, dir), cmd: permCmd(b.ai), model, effort });
+    const { dir, note } = cur && !cur.exited ? { dir: cur.dir } : startDir(p, t);
+    const argv = launch.buildArgv({ ai: b.ai, prompt: taskPrompt(p, t, file, dir, 'terminal', { ai: b.ai, model }), cmd: permCmd(b.ai), model, effort });
     if (DRY) return send(res, 200, { ok: true, dry: true, dir, model, effort, ...argv });
     try {
       const s = sessions.start({ project: b.project, task: b.task, ai: b.ai, dir, command: argv.command, args: argv.args, cols: b.cols, rows: b.rows });
       record('start', b, { model, effort, dir });
       return send(res, 200, { ok: true, dir, note, model, effort, running: !s.exited });
     } catch (e) {
-      return send(res, 500, { error: String(e.message || e) });
+      return send(res, e.status || 500, { error: String(e.message || e) });
     }
   }
   // 交代する：前の AI の会話を「引き継ぎ資料」にまとめ、相手の AI に読ませて続けさせる
@@ -353,10 +823,11 @@ async function api(req, res, url) {
   if (url.pathname === '/api/term/handoff') {
     const p = store.readProject(b.project);
     const file = store.taskFile(b.project, b.task);
-    if (!p || !file || !['claude', 'codex'].includes(b.to)) return send(res, 400, { error: '作業が見つかりません' });
+    if (!p || !file || !launch.AIS.includes(b.to)) return send(res, 400, { error: '作業が見つかりません' });
     const t = store.readTask(file);
-    const from = b.to === 'claude' ? 'codex' : 'claude';
-    const LABEL = { claude: 'Claude Code', codex: 'Codex' };
+    const from = b.from || (b.to === 'claude' ? 'codex' : b.to === 'codex' ? 'claude' : '');
+    if (!launch.AIS.includes(from) || from === b.to) return send(res, 400, { error: '交代元を指定してください' });
+    const LABEL = launch.AI_LABEL;
     const tgt = sessions.get(b.project, b.task, b.to);
     const tgtLive = tgt && !tgt.exited;
     if (!tgtLive) {
@@ -365,7 +836,7 @@ async function api(req, res, url) {
     }
     if (tgtLive && Date.now() - tgt.lastOut < 20000) return send(res, 409, { error: `${LABEL[b.to]} が作業中です。止まってから（入力待ちになってから）交代してください` });
     const src = sessions.get(b.project, b.task, from);
-    const { dir } = tgtLive ? { dir: tgt.dir } : workDir(p, t);
+    const { dir } = tgtLive ? { dir: tgt.dir } : startDir(p, t);
     const convo = transcript.collect({ ai: from, dir: (src && src.dir) || dir, since: src ? src.started : Date.now() - 3 * 86400000, buf: src && src.buf });
     const board = path.join(p.dir, '.ai', 'board.md');
     const note = b.note ? String(b.note).replace(/[\r\n]+/g, ' ').slice(0, 300) : '';
@@ -380,18 +851,19 @@ async function api(req, res, url) {
       sessions.type(b.project, b.task, b.to, msg);
     } else {
       spec = pickSpec(t, b.to);
-      const argv = launch.buildArgv({ ai: b.to, prompt: msg + ' ' + taskPrompt(p, t, file, dir), cmd: permCmd(b.to), model: spec.model, effort: spec.effort });
+      const argv = launch.buildArgv({ ai: b.to, prompt: msg + ' ' + taskPrompt(p, t, file, dir, 'terminal', { ai: b.to, model: spec.model }), cmd: permCmd(b.to), model: spec.model, effort: spec.effort });
       if (DRY) return send(res, 200, { ok: true, dry: true, packet: packetFile, kind: convo.kind, ...argv });
       try { sessions.start({ project: b.project, task: b.task, ai: b.to, dir, command: argv.command, args: argv.args, cols: b.cols, rows: b.rows }); started = true; }
       catch (e) { return send(res, 500, { error: String(e.message || e), packet: packetFile }); }
     }
-    store.updateTask(p.id, t.id, { owner: b.to === 'claude' ? 'claude-code' : 'codex', memo: `${LABEL[from]} から ${LABEL[b.to]} へ交代（引き継ぎ資料: ${packetFile}）` });
+    store.updateTask(p.id, t.id, { owner: launch.AI_KEY[b.to], memo: `${LABEL[from]} から ${LABEL[b.to]} へ交代（引き継ぎ資料: ${packetFile}）` });
     record('handoff', b, { packet: packetFile, kind: convo.kind, started });
     return send(res, 200, { ok: true, packet: packetFile, kind: convo.kind, started, ...(spec || {}) });
   }
   // 動いている AI のモデル・思考を変える：作業ファイルに残し、その AI に /model・/effort を打つ
   if (url.pathname === '/api/term/switch') {
-    if (!['claude', 'codex'].includes(b.ai) || !['model', 'effort'].includes(b.field)) return send(res, 400, { error: '指定が正しくありません' });
+    if (b.ai === 'agy') return send(res, 409, { error: 'Agy は承認された Gemini 3.1 Pro (High) に固定しています' });
+    if (!launch.AIS.includes(b.ai) || !['model', 'effort'].includes(b.field)) return send(res, 400, { error: '指定が正しくありません' });
     if (b.field === 'model') {
       const invalidModel = modelError(b.ai, String(b.value || ''));
       if (invalidModel) return send(res, 409, { error: invalidModel });
@@ -419,13 +891,13 @@ async function api(req, res, url) {
   if (url.pathname === '/api/continue') {
     const p = store.readProject(b.project);
     const file = store.taskFile(b.project, b.task);
-    if (!p || !file || !['claude', 'codex'].includes(b.ai)) return send(res, 400, { error: '作業が見つかりません' });
+    if (!p || !file || !launch.AIS.includes(b.ai)) return send(res, 400, { error: '作業が見つかりません' });
     const t = store.readTask(file);
     const spec = pickSpec(t, b.ai);
     const invalidModel = modelError(b.ai, spec.model);
     if (invalidModel) return send(res, 409, { error: invalidModel });
-    const { dir } = workDir(p, t);
-    const command = launch.buildCommand({ ai: b.ai, dir, prompt: taskPrompt(p, t, file, dir), cmd: permCmd(b.ai), ...spec });
+    const { dir } = startDir(p, t);
+    const command = launch.buildCommand({ ai: b.ai, dir, prompt: taskPrompt(p, t, file, dir, 'terminal', { ai: b.ai, model: spec.model }), cmd: permCmd(b.ai), ...spec });
     const r = await launch.openTerminal(command, DRY);
     return send(res, 200, { ok: true, dir, ...(DRY ? { command, r } : {}) });
   }
@@ -459,8 +931,9 @@ async function api(req, res, url) {
     if (!target) return send(res, 404, { error: `見つかりません：${raw}` });
     if (denied(target)) return send(res, 403, { error: denied(target) });
     const isDir = fs.statSync(target).isDirectory();
-    // how: list＝フォルダの中身を返す（Finder を使わずに画面で見る）／open＝ファイルをそのアプリで開く／finder（前から）＝Finder で見せる
-    const how = ['list', 'open'].includes(b.how) ? b.how : 'finder';
+    // info＝開かず種類と場所を返す／list＝フォルダの中身／open＝元ファイルを既定アプリで開く／finder＝Finderで表示
+    const how = ['info', 'list', 'open'].includes(b.how) ? b.how : 'finder';
+    if (how === 'info') return send(res, 200, { ok: true, path: target, dir: isDir, how });
     if (how === 'list' && isDir) {
       let entries = [];
       try {
@@ -487,12 +960,42 @@ async function api(req, res, url) {
   }
 
   // 作業の状態・質問・メモ・モデル・思考
+  // 作業用コピーの古い記録を片付ける（場所が無い時だけ。取り込み済みの後に AI が書き戻した時など）
+  if (url.pathname === '/api/task/copyclear') {
+    const p = store.readProject(b.project), file = p && store.taskFile(b.project, b.task), t = file && store.readTask(file);
+    if (!t) return send(res, 400, { error: '作業が見つかりません' });
+    if (!copyMissing(p, t)) return send(res, 409, { error: '作業用コピーはまだあります（片付けるのは、場所が無い時だけ）' });
+    const m = lastMerge(p.id, t.id);
+    const done = store.updateTask(p.id, t.id, { workdir: '', memo: m ? '本体に取り込み済み。作業用コピーの古い記録を片付けた' : '作業用コピーの古い記録を片付けた' });
+    record('copyclear', b, { merged: Boolean(m) });
+    return send(res, 200, { ok: true, merged: Boolean(m), task: done });
+  }
   if (url.pathname === '/api/task') {
+    if (fromRemote()) record('task', b, { state: b.state, question: b.question !== undefined, memo: b.memo !== undefined });
+    if (b.state === '完了') return send(res, 409, { error: '［完了に移す］で内容を確認してから完了にしてください' });
     const str = k => (typeof b[k] === 'string' ? b[k] : undefined);
+    let context = {};
+    if (['kind','derivedFrom','parent','workspaceMode'].some(k => b[k] !== undefined)) {
+      try {
+        const p=store.readProject(b.project), file=store.taskFile(b.project,b.task), t=file && store.readTask(file);
+        if (!p || !t) throw Error('作業がありません');
+        context=require('./lib/work-context').validateTask(p,t,b,store.listProjects());
+        if (b.workspaceMode !== undefined && b.workspaceMode !== t.workspaceMode && (t.workspaceStarted || t.state !== '未着手' || t.workdir || chats.busy(p.id,t.id) || sessions.list().some(s=>s.project===p.id && s.task===t.id && s.running))) throw Error('場所は作業開始前に選んでください。既存コピーは自動で移しません');
+      } catch(e) { return send(res,409,{error:e.message}); }
+    }
     const t = store.updateTask(b.project, b.task, {
       state: str('state'), question: str('question'), owner: str('owner'), role: str('role'),
-      model: str('model'), effort: str('effort'), parent: str('parent'), phase: str('phase'), via: str('via'), memo: b.memo,
+      ...context, model: str('model'), effort: str('effort'), parent: str('parent'), phase: str('phase'), via: str('via'), memo: b.memo,
     });
+    return t ? send(res, 200, t) : send(res, 400, { error: '作業が見つかりません' });
+  }
+  if (url.pathname === '/api/task/completion') {
+    if (b.confirm !== true) return send(res, 400, { error: '完了に移すか確認してください' });
+    if (b.action === 'approve' && (chats.running.has(`${b.project}\u0000${b.task}`) || launch.AIS.some(a => { const s = sessions.get(b.project, b.task, a); return s && !s.exited; }))) return send(res, 409, { error: 'AIが作業中です。終わってから完了を確認してください' });
+    const t = store.decideTask(b.project, b.task, b.action, b.expectedHash);
+    if (t?.error) return send(res, t.status, { error: t.error });
+    if (t) record(b.action === 'approve' ? 'taskdone' : 'taskreopen', b);
+    if (t && b.action === 'approve') { const p = store.readProject(b.project); if (p) reportChild(p, '作業の完了', [t.title, handoff.lastEntry(t.done)].filter(Boolean).join('\n')); }
     return t ? send(res, 200, t) : send(res, 400, { error: '作業が見つかりません' });
   }
   // 手順に印を付ける・外す
@@ -500,18 +1003,62 @@ async function api(req, res, url) {
     const t = typeof b.add === 'string' ? store.addStep(b.project, b.task, b.add) : store.setStep(b.project, b.task, Number(b.index), Boolean(b.done));
     return t ? send(res, 200, t) : send(res, 400, { error: 'その手順が見つかりません' });
   }
+  if (url.pathname === '/api/phase/continue') {
+    const current = store.readProject(b.project);
+    if (!current || current.completionHash !== b.expectedHash) return send(res, 409, { error: '確認中にフェーズが更新されました' });
+    const p = store.continuePhase(b.project); return send(res, 200, p);
+  }
   // プロジェクトを完了にする・戻す（人がはっきり押した時だけ）
   if (url.pathname === '/api/project/status') {
+    if (b.status === '完了' && b.confirm !== true) return send(res, 400, { error: '完了に移すか確認してください' });
+    const current = store.readProject(b.project);
+    if ((b.status === '完了' || b.expectedHash) && current?.completionHash !== b.expectedHash) return send(res, 409, { error: '確認中にプロジェクトが更新されました' });
     if (!['完了', '進行中'].includes(b.status)) return send(res, 400, { error: '形式が違います' });
+    if (b.status === '完了') {
+    if (sessions.list().some(x => x.project === b.project && x.running) || [...chats.running.keys()].some(k => k.startsWith(b.project + '\u0000'))) return send(res, 409, { error: 'このプロジェクトでAIが作業中です。終わってから完了を確認してください' });
+    }
     const p = store.setProjectStatus(b.project, b.status);
     if (p) record(b.status === '完了' ? 'projectdone' : 'projectreopen', { project: b.project });
+    if (p && b.status === '完了' && p.status === '完了') reportChild(p, '完了', handoff.completionText(p));
     return p ? send(res, 200, { ok: true, status: p.status }) : send(res, 400, { error: 'プロジェクトが見つかりません' });
+  }
+  // 親に結果を渡す（人がはっきり押した時）。文が無ければ一番新しい作業の「やったこと」の最後
+  if (url.pathname === '/api/project/handoff') {
+    const p = store.readProject(b.project);
+    if (!p) return send(res, 400, { error: 'プロジェクトが見つかりません' });
+    const t = handoff.newestTask(p);
+    const text = (typeof b.text === 'string' && b.text.trim()) || (t ? handoff.lastEntry(t.done) : '');
+    if (!text) return send(res, 400, { error: '渡す内容がありません。文を書くか、作業の「やったこと」を書いてください' });
+    if (text.length > 4000) return send(res, 400, { error: '渡す文は4000文字までです' });
+    const r = reportChild(p, '報告', text);
+    if (!r) return send(res, 400, { error: '親プロジェクトが見つかりません' });
+    return send(res, 200, { ok: true, parent: r.parent, task: r.task, duplicate: r.duplicate });
   }
   // 次のフェーズへ進む（今のフェーズを完了に）
   if (url.pathname === '/api/phase/next') {
+    if (b.confirm !== true) return send(res, 400, { error: '今のフェーズを完了に移すか確認してください' });
+    const current = store.readProject(b.project);
+    if (!current || b.expectedHash !== current.completionHash) return send(res, 409, { error: '確認中にフェーズが更新されました。内容を読み直してください' });
+    if (sessions.list().some(x => x.project === b.project && x.running) || [...chats.running.keys()].some(k => k.startsWith(b.project + '\u0000'))) return send(res, 409, { error: 'このプロジェクトでAIが作業中です。終わってから完了を確認してください' });
     const p = store.nextPhase(b.project);
     if (p) record('nextphase', b);
     return p ? send(res, 200, { ok: true, phases: p.phases }) : send(res, 400, { error: 'プロジェクトが見つかりません' });
+  }
+  // コピーと再開先は保持したまま、取り込み対象から外す・戻す
+  if (url.pathname === '/api/task/merge-exclusion') {
+    if (typeof b.excluded !== 'boolean') return send(res, 400, { error: '除外するかどうかを指定してください' });
+    const p = store.readProject(b.project);
+    const file = p && store.taskFile(p.id, b.task);
+    if (!file) return send(res, 400, { error: '作業が見つかりません' });
+    const t = store.readTask(file);
+    if (!inWork(p, t)) return send(res, 400, { error: 'この作業には作業用コピーがありません' });
+    if (t.mergeExcluded === b.excluded) return send(res, 200, { ok: true, task: t });
+    const updated = store.updateTask(p.id, t.id, {
+      mergeExcluded: b.excluded,
+      memo: b.excluded ? '取り込み対象から外しました（作業用コピーと再開先は保持）' : '取り込み対象に戻しました',
+    });
+    record(b.excluded ? 'mergeexclude' : 'mergeinclude', b);
+    return send(res, 200, { ok: true, task: updated });
   }
   // 作業用コピーを本体に取り込んで片付ける
   if (url.pathname === '/api/task/merge') {
@@ -519,22 +1066,116 @@ async function api(req, res, url) {
     const file = store.taskFile(b.project, b.task);
     if (!p || !file) return send(res, 400, { error: '作業が見つかりません' });
     const t = store.readTask(file);
+    if(require('./public/project-order').integrators(p,t,store.listProjects()).length) return send(res,409,{error:'親作業の［統合…］で取り込みます。子作業では［成果を渡す］を行ってください'});
     if (!inWork(p, t)) return send(res, 400, { error: 'この作業には作業用コピーがありません' });
-    if (['claude', 'codex'].some(a => { const s = sessions.get(b.project, b.task, a); return s && !s.exited; })) return send(res, 409, { error: '先に AI を止めてください（作業中に取り込むと、途中の変更が混ざります）' });
+    if (copyMissing(p, t)) {
+      const m = lastMerge(p.id, t.id);
+      const when = m ? new Date(m.at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+      const note = m ? `この作業は ${when} に本体へ取り込み済みです（作業用コピーはゴミ箱へ移してあります）。` : '作業用コピーの場所が見つかりません（消えたか、別の場所に移っています）。';
+      store.updateTask(p.id, t.id, { workdir: '', memo: `${note} 作業ファイルの古い記録を片付けました` });
+      record('mergeskip', b, { merged: Boolean(m) });
+      return send(res, 409, { error: `${note} 変更は本体に入っています。作業ファイルの古い記録を片付けたので、続きは本体でそのまま始められます` });
+    }
+    if (t.mergeExcluded) return send(res, 409, { error: '取り込み対象から外されています。先に［取り込み対象に戻す］を選んでください' });
+    if (removal.busy(p.id, t.id) || maintenance.locked(p.id)) return send(res, 409, { error: 'AI・整理・確認が動いています。この返事が終わってから取り込んでください' });
     let r;
     try { r = gitw.merge({ dir: expandHome(t.workdir), workRoot: workRoot(p), title: `${t.id} ${t.title}` }); }
     catch (e) { r = { ok: false, error: String(e.message || e).split('\n')[0] }; }
-    record('merge', b, { ok: Boolean(r.ok), conflict: Boolean(r.conflict) });
+    record('merge', b, { ok: Boolean(r.ok), conflict: Boolean(r.conflict), ...(r.ok ? {main:r.main,commit:r.commit,files:r.files} : {}) });
     if (r.conflict) {
       store.updateTask(p.id, t.id, { state: '返事待ち', question: '本体に取り込む時にぶつかりました。AI を始めて「本体の最新を取り込み、ぶつかった所を直して」と頼んでから、もう一度［本体に取り込む］を押してください' });
       return send(res, 409, { error: r.error, conflict: true });
     }
     if (!r.ok) return send(res, 400, { error: r.error });
-    for (const a of ['claude', 'codex']) sessions.stop(b.project, b.task, a);
+    for (const a of launch.AIS) sessions.stop(b.project, b.task, a);
     const done = store.updateTask(p.id, t.id, { workdir: '', state: '完了', question: '', memo: `本体に取り込み、作業用コピーをゴミ箱へ移しました（${r.main}）` });
+    try { store.appendSection(p.id, t.id, 'やったこと', `- ${new Date().toISOString().slice(0, 16).replace('T', ' ')} 本体に取り込み済み（${r.main}）。作業用コピーはゴミ箱へ。workdir は空のままにすること`); } catch (e) { /* 無くてもよい */ }
     return send(res, 200, { ok: true, main: r.main, trashed: r.trashed, task: done });
   }
-  // 会話画面：送る・止める
+  // 成果ファイルを選び、保存と受領通知の後に子作業・派生を片付ける。
+  if (url.pathname === '/api/task/handup/preview') {
+    try { return send(res, 200, taskTransfer.offerPreview(b.project, b.task, b.paths || [], b.expectTitle)); }
+    catch (e) { return send(res, 409, {error:e.message}); }
+  }
+  if (url.pathname === '/api/task/handup' || url.pathname === '/api/task/absorb' && taskTransfer.read(b.project,b.task)?.destination && !taskTransfer.read(b.project,b.task)?.integrating) {
+    try {
+      const r = url.pathname === '/api/task/handup' ? taskTransfer.offer(b) : taskTransfer.apply(b); if(!r.handedUp)setUnread(b.project,b.task,false);
+      record('absorb', {project:r.parentProject,task:r.parent}, {child:b.task,childProject:b.project,files:r.files,receipt:r.record});
+      return send(res,200,r);
+    } catch(e) { return send(res,409,{error:e.message}); }
+  }
+  if(url.pathname === '/api/task/integrate/preview') {
+    try{return send(res,200,taskIntegrate.preview(b.project,b.task,b.only));}catch(e){return send(res,409,{error:e.message});}
+  }
+  if(['/api/task/integrate','/api/task/absorb'].includes(url.pathname)) {
+    try { const r=taskIntegrate.apply(b); record('integrate',b,{ok:r.ok,complete:r.complete,conflict:r.conflict});pruneUnread();return send(res,r.conflict?409:200,r); }
+    catch(e){return send(res,409,{error:e.message});}
+  }
+  if (url.pathname === '/api/delegate') {
+    const p = store.readProject(b.project);
+    const file = p && store.taskFile(b.project, b.task);
+    const text = typeof b.text === 'string' ? b.text.trim() : '';
+    const ai = b.ai === 'claude-code' ? 'claude' : b.ai;
+    if (!p || !file || !launch.AIS.includes(ai)) return send(res, 400, { error: 'project・task・ai（codex / claude / agy）を確かめてください' });
+    if (!text || text.length > 8000) return send(res, 400, { error: 'text は1〜8000文字' });
+    if (aiTools.isOperating()) return send(res, 409, { error: 'AI の更新・モデル再取得が進行中です' });
+    const t = store.readTask(file);
+    const sizeNote = text.length > 1500 ? ' Hub が付ける内容を除き、差分だけにすると短くなります' : '';
+    const title = String(b.title || text.split('\n')[0]).trim().slice(0, 60) || '渡した作業';
+    if (t.state === '完了') return send(res, 409, { error: DELEGATE_COMPLETED_ERROR });
+    // 委任先の役割は元の担当と異なることがある。親の role/model や CLI の既定へは戻さない。
+    const role = b.role && rolesData().roles.find(r => r.name === b.role);
+    if (b.role && (!role || role.main.ai !== launch.AI_KEY[ai])) return send(res, 400, { error: 'role は指定した AI が主担当の役割を選んでください' });
+    const model = launch.modelLabel(ai, typeof b.model === 'string' ? b.model.trim() : role?.main.model || '');
+    if (!model) return send(res, 400, { error: 'model 又は role を明示してください。例：チェックは ai: claude・model: claude-fable-5-1、書込は ai: codex・model: gpt-6.1-sol。作業は増やしていません' });
+    const invalid = modelError(ai, model);
+    if (invalid) return send(res, 409, { error: invalid });
+    if (!launch.flagFor(ai, model)) return send(res, 409, { error: '委任には CLI に渡すモデル名が必要です。指定なしでは起動しません' });
+    const terminalError = delegateTerminalError(p.id, t.id);
+    if (terminalError) return send(res, 409, { error: terminalError });
+    const sourceTurn = chats.busy(p.id, t.id)?.userRow?.turn || null;
+    const busy = Boolean(chats.busy(p.id, t.id));
+    let dir;
+    try { ({ dir } = startDir(p, t, busy)); } catch (e) { return send(res, 409, { error: String(e.message || e) }); }
+    const effort = ai === 'agy' ? '高' : roles.EFFORTS.includes(b.effort) ? b.effort : role?.main.effort || '';
+    const shown = `【渡した依頼：${title}】\n${text}`;
+    const request = { ai, model, effort, sourceTurn, role: b.role || '', requireModel: true, requiredModel: launch.flagFor(ai, model), shown, text: shown + '\n\n新しい作業・子作業を作らず、この既存作業で依頼を行い、結果をこの会話へ返してください。', perm: permCmd(ai) };
+    const enqueue = () => {
+      const item = chats.enqueue(p.id, t.id, request);
+      record('delegate', { project: p.id, task: t.id, ai }, { title, model, effort, queued: true, id: item.id, sourceTurn });
+      return send(res, 200, { ok: true, project: p.id, task: t.id, title, model, effort, queued: true, id: item.id, queue: chats.queue(p.id, t.id).length, note: (chats.busy(p.id, t.id) ? '今の AI が終わったら、同じ作業で指定の AI が始まります。開始時に上限継続を確かめた時は Astra で始めます。この番を終えてください' : '同じ作業の順番待ちに追加しました。画面の［始める］で再開できます') + sizeNote });
+    };
+    if (busy || chats.queue(p.id, t.id).length) return enqueue();
+    const basePrompt = taskPrompt(p, t, file, dir) + ' 同じ作業で担当 AI から渡された依頼です。結果と残った課題をこの会話へ返してください。';
+    const onEnd = row => {
+      if (row.asks && row.asks.length) store.updateTask(p.id, t.id, { state: '返事待ち', question: row.asks.map(a => a.question).filter(Boolean).join(' / ').slice(0, 300) || '選んでください' });
+      chatEnded(p.id, t.id);
+      record('delegateend', { project: p.id, task: t.id, ai: row.ai }, { title, model: row.model, error: Boolean(row.error) });
+    };
+    try {
+      const stopVersion = chats.stops.get(chats.key(p.id, t.id)) || 0;
+      await refreshLimitEvidence(request);
+      if ((chats.stops.get(chats.key(p.id, t.id)) || 0) !== stopVersion) throw Error('利用上限の確認中に停止されたため、委任を開始していません');
+      const terminalError = delegateTerminalError(p.id, t.id);
+      if (terminalError) throw Error(terminalError);
+      // 状態要求を待つ間に他の依頼が始まった場合も同じ待ち順へ入れる。
+      if (chats.busy(p.id, t.id) || chats.queue(p.id, t.id).length) return enqueue();
+      const r = chats.send({ ...request, project: p.id, task: t.id, pdir: p.dir, dir, basePrompt, policy: modelPolicy(p, t), onEnd });
+      if (!(await r.started)) throw Error('AIを起動できませんでした。CLIの導入状態を確認してください。作業の状態と質問は変更していません');
+      store.updateTask(p.id, t.id, { state: '実行中', question: '' });
+      record('delegate', { project: p.id, task: t.id, ai: r.ai }, { title, model: r.model, effort: r.effort, queued: false, preflight: Boolean(r.limitSwitch?.preflight), sourceTurn, receivedTurn: r.userRow.turn });
+      return send(res, 200, { ok: true, project: p.id, task: t.id, title, ai: r.ai, model: r.model, effort: r.effort, queued: false, resume: r.resume, note: `${r.limitSwitch?.preflight ? 'Fable上限保持中のため Astra で開始しました。' : ''}同じ作業で ${launch.AI_LABEL[r.ai]}・${r.model} が作業中です。結果もこの会話へ届きます` + sizeNote });
+    } catch (e) { return send(res, 409, { error: String(e.message || e) }); }
+  }
+  // 会話に「人の依頼」を残すだけ（ChatGPT アプリに貼って頼んだ時など、Hub では AI を動かさない）
+  if (url.pathname === '/api/chat/note') {
+    const p = store.readProject(b.project), file = p && store.taskFile(b.project, b.task);
+    const text = typeof b.text === 'string' ? b.text.trim() : '';
+    if (!file || !text || text.length > 8000) return send(res, 400, { error: '作業と依頼を確かめてください' });
+    const row = chat.append(p.dir, b.task, { role: 'user', text, to: String(b.to || '').slice(0, 20) });
+    chats.emit(p.id, b.task, { type: 'row', row });
+    return send(res, 200, { ok: true });
+  }
   if (url.pathname === '/api/chat/send') {
     // 待っている指示を今すぐ始める（再起動の後など、作業中でない時）
     const fromQueue = b.fromQueue ? chats.queue(b.project, b.task).find(x => x.id === String(b.fromQueue)) : null;
@@ -543,30 +1184,40 @@ async function api(req, res, url) {
     const p = store.readProject(b.project);
     const file = store.taskFile(b.project, b.task);
     const text = typeof b.text === 'string' ? b.text.trim() : '';
-    if (!p || !file || !['claude', 'codex'].includes(b.ai)) return send(res, 400, { error: '作業が見つかりません' });
+    if (!p || !file || !launch.AIS.includes(b.ai)) return send(res, 400, { error: '作業が見つかりません' });
     if (!text) return send(res, 400, { error: '依頼を書いてください' });
     const t = store.readTask(file);
+    const delegated = Boolean(fromQueue?.requireModel);
+    if (delegated && t.state === '完了') return send(res, 409, { error: DELEGATE_COMPLETED_ERROR });
     const busy = chats.busy(p.id, b.task);
     // redo: 取り消してやり直す ／ amend: 追加説明（一緒にやる）／ queue: 終わったら次に（interrupt は前の呼び名）
     const want = b.mode === 'interrupt' ? 'redo' : b.mode;
     const mode = busy ? (['redo', 'amend', 'queue'].includes(want) ? want : '') : '';
     if (busy && !mode) return send(res, 409, { error: 'まだ作業中です。［取り消してやり直す］［追加説明（一緒にやる）］［終わったら次に］から選んでください' });
     const spec = pickSpec(t, b.ai);
-    const model = b.model || spec.model;
+    const model = launch.modelLabel(b.ai, b.model || spec.model);
     const invalidModel = modelError(b.ai, model);
     if (invalidModel) return send(res, 409, { error: invalidModel });
-    const { dir, note } = workDir(p, t);
-    const effort = roles.EFFORTS.includes(b.effort) ? b.effort : spec.effort;
+    const { dir, note } = startDir(p, t, Boolean(mode));
+    const effort = b.ai === 'agy' ? '高' : roles.EFFORTS.includes(b.effort) ? b.effort : spec.effort;
     const basePrompt = taskPrompt(p, t, file, dir) + ' ここは会話画面。人からの依頼に答え、区切りで作業ファイルを更新すること。';
+    // 受付時の質問だけを消す。起動待ち中に来た新しい質問には触れない。
+    const answerQuestion = typeof b.answerQuestion === 'string' ? b.answerQuestion : t.question;
+    const acceptAnswer = () => {
+      const current = store.readTask(file);
+      if (current.question !== answerQuestion) return null;
+      if (current.question || current.state === '返事待ち') store.updateTask(p.id, t.id, { question: '', state: '実行中' });
+      return answerQuestion;
+    };
     // 追加：今の作業が終わったら続けて行う
     if (mode === 'queue') {
-      const it = chats.enqueue(p.id, t.id, { ai: b.ai, model, effort, text, perm: permCmd(b.ai) });
+      const it = chats.enqueue(p.id, t.id, { ai: b.ai, model, effort, role: t.role, text, perm: permCmd(b.ai) });
       record('chatqueue', { project: p.id, task: t.id, ai: b.ai }, { model });
-      return send(res, 200, { ok: true, queued: true, id: it.id, queue: chats.queue(p.id, t.id).length });
+      return send(res, 200, { ok: true, queued: true, id: it.id, queue: chats.queue(p.id, t.id).length, answeredQuestion: acceptAnswer() });
     }
     // 取り消し・追加説明：今の作業を区切って（終わるのを待って）から、元の指示と合わせて伝え直す
     let sendText = text;
-    if (mode === 'redo' || mode === 'amend') {
+    if (!busy?.pending && (mode === 'redo' || mode === 'amend')) {
       const last = chat.read(p.dir, t.id).filter(r => r.role === 'user').pop();
       const prev = last ? String(last.text).replace(/\s+/g, ' ').slice(0, 400) : '';
       await chats.stop(p.id, t.id, { interrupting: true });
@@ -577,16 +1228,39 @@ async function api(req, res, url) {
     }
     try {
       // 答えを送ったら、AI からの質問は済んだことにする
-      if (t.question || t.state === '返事待ち') store.updateTask(p.id, t.id, { question: '', state: '実行中' });
+      // 質問は spawn の成功後にだけ解除する。
       // AI が質問して終わったら「あなたの番」にする（左の丸が黄色になる）
-      const onEnd = row => { if (row.asks && row.asks.length) store.updateTask(p.id, t.id, { state: '返事待ち', question: row.asks.map(a => a.question).filter(Boolean).join(' / ').slice(0, 300) || '選んでください' }); };
-      const r = chats.send({ project: p.id, task: t.id, pdir: p.dir, dir, ai: b.ai, model, effort, text: sendText, shown: text, mode: mode || (fromQueue ? 'queued' : undefined), basePrompt, policy: modelPolicy(), perm: permCmd(b.ai), onEnd });
+      const onEnd = row => { if (row.asks && row.asks.length) store.updateTask(p.id, t.id, { state: '返事待ち', question: row.asks.map(a => a.question).filter(Boolean).join(' / ').slice(0, 300) || '選んでください' }); chatEnded(p.id, t.id); };
+      let replacement;
+      if (busy?.pending && (mode === 'redo' || mode === 'amend')) {
+        replacement = chats.replacePending(p.id, t.id, text, mode);
+        await replacement.finished;
+      }
+      const r = replacement
+        ? await chats.sendQueued(replacement.options)
+        : await (fromQueue ? chats.sendQueued.bind(chats) : chats.send.bind(chats))({ project: p.id, task: t.id, pdir: p.dir, dir, ai: b.ai, model, effort, role: fromQueue ? fromQueue.role || '' : t.role, limitSwitch: fromQueue?.limitSwitch, request: fromQueue?.id, requireModel: Boolean(fromQueue?.requireModel), requiredModel: fromQueue?.requiredModel, text: sendText, shown: fromQueue?.shown || text, mode: mode || (fromQueue ? 'queued' : undefined), basePrompt, policy: modelPolicy(p, t), perm: permCmd(b.ai), onEnd });
+      if (!(await r.started)) throw Error('AIを起動できませんでした。CLIの導入状態を確認してください。作業の状態と質問は変更していません');
+      const answeredQuestion = delegated ? null : acceptAnswer();
+      if (delegated) {
+        store.updateTask(p.id, t.id, { state: '実行中', question: '' });
+      }
       if (fromQueue) chats.unqueue(p.id, t.id, fromQueue.id);
-      record('chat', { project: p.id, task: t.id, ai: b.ai }, { model, effort, resume: r.resume });
-      return send(res, 200, { ok: true, model, effort, note, resume: r.resume });
+      if (replacement) {
+        chats.unqueue(p.id, t.id, replacement.options.request);
+        record(mode === 'redo' ? 'chatredo' : 'chatamend', { project: p.id, task: t.id, ai: r.ai });
+      }
+      record('chat', { project: p.id, task: t.id, ai: r.ai }, { model: r.model, effort: r.effort, resume: r.resume });
+      return send(res, 200, { ok: true, model: r.model, effort: r.effort, note: r.limitSwitch?.preflight ? 'Fable上限保持中のため Astra で開始しました。' : note, resume: r.resume, answeredQuestion });
     } catch (e) { return send(res, 409, { error: String(e.message || e) }); }
   }
+  // 未読の印を消す（画面が作業を開いた時）
+  if (url.pathname === '/api/task/read') {
+    if (typeof b.project !== 'string' || typeof b.task !== 'string') return send(res, 400, { error: '作業が見つかりません' });
+    setUnread(b.project, b.task, false);
+    return send(res, 200, { ok: true });
+  }
   if (url.pathname === '/api/chat/unqueue') {
+    if (fromRemote()) record('chatunqueue', b);
     return send(res, 200, { ok: true, queue: chats.unqueue(b.project, b.task, String(b.id || '')) });
   }
   if (url.pathname === '/api/chat/stop') {
@@ -650,7 +1324,7 @@ async function api(req, res, url) {
     if (!file) return send(res, 400, { error: '作業が見つかりません' });
     if (!paths.length) return send(res, 400, { error: 'ファイルが見つかりません' });
     store.updateTask(p.id, b.task, { memo: `ファイルを渡した: ${paths.join(' , ')}` });
-    const ai = ['claude', 'codex'].includes(b.ai) ? b.ai : '';
+    const ai = launch.AIS.includes(b.ai) ? b.ai : '';
     const typed = ai ? sessions.write(p.id, b.task, ai, paths.map(x => (/\s/.test(x) ? `"${x}"` : x)).join(' ') + ' ') : false;
     record('upload', { project: p.id, task: b.task, ai }, { file: paths.join(' , ') });
     return send(res, 200, { ok: true, paths, typed });
@@ -667,6 +1341,57 @@ async function api(req, res, url) {
   }
 
   // 新しいプロジェクトを始める
+  // 中身の無い作業・子プロジェクトを探す／ゴミ箱へまとめて移す
+  if (url.pathname === '/api/empty/scan' || url.pathname === '/api/empty/trash') {
+    const busy = (project, task) => sessions.list().some(x => x.running && x.project === project && x.task === task) || Boolean(chats.busy(project, task));
+    if (url.pathname === '/api/empty/scan') return send(res, 200, { ok: true, items: emptyLib.scan(store, busy) });
+    const r = emptyLib.trash(store, busy, Array.isArray(b.items) ? b.items : []);
+    record('emptytrash', {}, { moved: r.moved });
+    return send(res, 200, { ok: true, ...r });
+  }
+  if (url.pathname.startsWith('/api/hierarchy/remove/')) {
+    try {
+      let result;
+      if(url.pathname.endsWith('/preview')) result=removal.preview(b.project,b.task);
+      else if(url.pathname.endsWith('/apply')) {result=removal.apply(b);pruneUnread();record('remove',{}, {transaction:result.record,moved:result.moved.length});}
+      else if(url.pathname.endsWith('/restore')) {result=removal.restore(b.record,b.confirm);record('removerestore',{}, {transaction:b.record});}
+      else if(url.pathname.endsWith('/history')) result={history:removal.history()};
+      else return send(res,404,{error:'not found'});
+      return send(res,200,result);
+    }catch(e){return send(res,409,{error:e.message});}
+  }
+  if (url.pathname.startsWith('/api/maintenance/')) {
+    try {
+      let result;
+      if (url.pathname === '/api/maintenance/preview') result=maintenance.preview(b.project);
+      else if (url.pathname === '/api/maintenance/apply') {result=maintenance.apply(b.project,b.token,b.selected,b.confirm);record('cleanup', {project:b.project}, {transaction:result.id,moved:result.moved});}
+      else if (url.pathname === '/api/maintenance/restore') {result=maintenance.restore(b.project,b.transaction,b.confirm);record('restore',{project:b.project},{transaction:b.transaction});}
+      else if (url.pathname === '/api/maintenance/verify') {result=await maintenance.verify(b.project,b.script,b.expectedHash,b.confirm);record('verify',{project:b.project},{ok:result.ok,script:b.script});}
+      else return send(res,404,{error:'操作が見つかりません'});
+      return send(res,200,result);
+    } catch(e) {return send(res,409,{error:e.message});}
+  }
+  if (url.pathname === '/api/hierarchy/pin') {
+    try {
+      const result = projectOrder.pin(b);
+      record('projectpin', { project: b.project }, { pinned: b.pinned });
+      return send(res, 200, result);
+    } catch (e) { return send(res, 409, { error: e.message }); }
+  }
+  if (url.pathname === '/api/hierarchy/order') {
+    try {
+      const result = projectOrder.save(b);
+      record('projectorder', {}, { parent: b.parent, order: b.order });
+      return send(res, 200, result);
+    } catch (e) { return send(res, 409, { error: e.message }); }
+  }
+  if (url.pathname === '/api/hierarchy/rename') {
+    try {
+      const { Hierarchy } = require('./lib/hierarchy');
+      const value = new Hierarchy(store, id => sessions.list().some(s=>s.project===id && s.running) || [...chats.running.keys()].some(k=>k.startsWith(id+'\u0000'))).rename(b.project, b.task, b.name, b.expectedHash);
+      record('rename', { project: b.project, task: b.task }); return send(res, 200, value);
+    } catch(e) { return send(res, 409, { error: e.message }); }
+  }
   if (url.pathname === '/api/project/new') {
     const body = expandHome(b.body || '');
     if (body && !fs.existsSync(body)) return send(res, 400, { error: `本体のフォルダが見つかりません: ${body}` });
@@ -680,17 +1405,27 @@ async function api(req, res, url) {
   if (url.pathname === '/api/task/new') {
     const t = store.createTask(b.project, b);
     if (t) record('newtask', { project: b.project, task: t.id }, { title: t.title });
-    return t ? send(res, 200, t) : send(res, 400, { error: '作業名を入れてください' });
+    return t ? send(res, 200, t) : send(res, 400, { error: '作業名・親作業・派生元を確認してください' });
   }
 
   // 選ぶ欄にモデルを出す・出さない
   if (url.pathname === '/api/models/hidden') {
-    if (!['claude-code', 'codex'].includes(b.ai) || typeof b.model !== 'string' || !b.model) return send(res, 400, { error: '形式が違います' });
-    const h = hiddenModels();
-    h[b.ai] = b.hidden ? [...new Set([...h[b.ai], b.model])] : h[b.ai].filter(m => m !== b.model);
-    fs.mkdirSync(path.dirname(MODEL_VIEW), { recursive: true });
-    fs.writeFileSync(MODEL_VIEW, JSON.stringify({ hidden: h }, null, 2));
-    return send(res, 200, { ok: true, hiddenModels: h });
+    if (!['claude-code', 'codex', 'agy'].includes(b.ai) || typeof b.model !== 'string' || !b.model) return send(res, 400, { error: '形式が違います' });
+    return send(res, 200, { ok: true, ...modelView.setHidden(b.ai, b.model, Boolean(b.hidden)) });
+  }
+  if (url.pathname === '/api/models/initial') {
+    const r = modelView.setInitial(b, rolesData().models, modelError);
+    if (r.error) return send(res, r.status, { error: r.error });
+    record('initialai', {}, r.initialPick);
+    return send(res, 200, { ok: true, ...r });
+  }
+  if (url.pathname === '/api/models/phone') {
+    const r = modelView.setPhone(b, rolesData().models);
+    return r.error ? send(res, r.status, { error: r.error }) : send(res, 200, { ok: true, ...r });
+  }
+  if (url.pathname === '/api/models/order') {
+    const r = modelView.setOrder(b.order, b.before, rolesData().models);
+    return r.error ? send(res, r.status, { error: r.error }) : send(res, 200, { ok: true, ...r });
   }
   // 最新のモデルに整理：役割の古いモデル名を、同じ系統の一番新しいモデルに。roles.yaml の一覧も今のものに
   if (url.pathname === '/api/models/tidy') {
@@ -719,19 +1454,54 @@ function serveStatic(res, pathname) {
   });
 }
 
+// 外から（tailscale serve 越し）の要求：オフなら断る。オンなら合言葉で入った札が要る
+async function remoteGate(req, res, url) {
+  const isApi = url.pathname.startsWith('/api/');
+  if (!remote.enabled()) return isApi ? send(res, 403, { error: '外からの利用はオフです' }) : send(res, 403, remoteLib.offPage(), 'text/html; charset=utf-8');
+  remote.noteHost(req.headers['x-forwarded-host'] || req.headers.host);
+  // 書き換える操作は、この画面から送った物だけ（ほかのサイトから送らせない）
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    const origin = req.headers.origin, hosts = [req.headers.host, req.headers['x-forwarded-host']].filter(Boolean).map(h => `https://${h}`);
+    if (req.headers['x-hub'] !== '1' || (origin && !hosts.includes(origin))) return send(res, 403, { error: 'forbidden' });
+  }
+  if (req.method === 'GET' && url.pathname === '/login') return send(res, 200, remoteLib.loginPage(), 'text/html; charset=utf-8');
+  if (req.method === 'POST' && url.pathname === '/api/login') {
+    let b; try { b = await readBody(req); } catch (e) { return send(res, 400, { error: '形式が違います' }); }
+    const who = remoteLib.whoOf(req), r = remote.login(b.passcode, who, req.headers['user-agent']);
+    record('remotelogin', {}, { ok: Boolean(r.ok), who });
+    if (!r.ok) return send(res, r.status, { error: r.error });
+    res.setHeader('Set-Cookie', remoteLib.sessionCookie(r.token));
+    return send(res, 200, { ok: true });
+  }
+  const token = remoteLib.cookieOf(req);
+  if (!remote.check(token)) {
+    if (isApi) return send(res, 401, { error: 'ログインしてください', login: true });
+    res.writeHead(302, { Location: '/login', 'Cache-Control': 'no-store' }); return res.end();
+  }
+  if (req.method === 'POST' && url.pathname === '/api/logout') {
+    remote.logout(token); record('remotelogout', {});
+    res.setHeader('Set-Cookie', remoteLib.clearCookie());
+    return send(res, 200, { ok: true });
+  }
+  if (isApi) return api(req, res, url);
+  if (req.method !== 'GET') return send(res, 405, { error: 'method' });
+  return serveStatic(res, url.pathname);
+}
+
 const server = http.createServer(async (req, res) => {
-  if (!allowed(req)) return send(res, 403, { error: 'forbidden' });
-  const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
   try {
+    const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
+    if (remoteLib.isRemote(req)) return await reqCtx.run({ remote: true }, () => remoteGate(req, res, url));
+    if (!allowed(req)) return send(res, 403, { error: 'forbidden' });
     if (url.pathname.startsWith('/api/')) return await api(req, res, url);
     if (req.method !== 'GET') return send(res, 405, { error: 'method' });
     return serveStatic(res, url.pathname);
   } catch (e) {
-    return send(res, 500, { error: String(e.message || e) });
+    return send(res, e.status || 500, { error: String(e.message || e) });
   }
 });
 
-function shutdown() { sessions.stopAll(); chats.stopAll(); server.close(); process.exit(0); }
+function shutdown() { procwatch.stop(); sessions.stopAll(); chats.stopAll(); server.close(); process.exit(0); }
 
 if (require.main === module) {
   // 新しい版に切り替える時は、前の本体が待ち受けを空けるまで少し待つ
@@ -746,9 +1516,10 @@ if (require.main === module) {
     console.log(`Project Hub: http://127.0.0.1:${PORT}  （台帳の場所: ${ROOT}）`);
     console.log(sessions.available() ? '作業画面: 使えます' : '作業画面: 部品（node-pty）が未設定。setup.sh を実行してください');
     console.log('止める時は、この窓で Control + C');
+    if (!DRY) procwatch.start();
   });
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
 
-module.exports = { server, PORT, sessions };
+module.exports = { server, PORT, sessions, taskPrompt };

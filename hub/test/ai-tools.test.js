@@ -7,6 +7,50 @@ const path = require('node:path');
 const { AiTools, codexModels, claudeModels, claudeInitialize } = require('../lib/ai-tools');
 const launch = require('../lib/launch');
 const roles = require('../lib/roles');
+const { latestVersion, newer } = require('../lib/update-check');
+
+test('更新確認は稼働中にも読取だけを行い、同時確認をまとめ、失敗では適用候補を消す', async () => {
+  const f = fixture();
+  try {
+    let release, fail = false, reads = 0;
+    const gate = new Promise(r => { release = r; });
+    const calls = [];
+    const tools = new AiTools({ root: f.root, home: f.home, busy: () => 2, find: () => '/fixture/codex', methods: { codex: 'standalone' },
+      run: async (file, args) => { calls.push(args); assert.deepEqual(args, ['--version']); return 'codex-cli 0.159.0'; },
+      latest: async () => { reads++; await gate; if (fail) throw Error('secret'); return { version: '0.160.0', source: 'fixture' }; } });
+    const first = tools.checkUpdate('codex'), second = tools.checkUpdate('codex');
+    assert.equal(tools.isOperating(), false);
+    await assert.rejects(tools.update('codex'), e => e.status === 409);
+    release(); const [a,b] = await Promise.all([first,second]);
+    assert.deepEqual(a,b); assert.equal(a.available, true); assert.equal(reads,1);
+    assert.deepEqual(calls, [['--version']]);
+    fail = true; await assert.rejects(tools.checkUpdate('codex'), e => e.status === 502 && !e.message.includes('secret'));
+    assert.equal(tools.updateChecks.codex.available, null); assert.equal(tools.updateChecks.codex.ok, false);
+  } finally { f.close(); }
+});
+test('公開版情報は配布元形式を検証し、stable設定と数値順比較を保つ', async () => {
+  const f = fixture();
+  try {
+    assert.equal(newer('0.160.0','0.99.0'),true); assert.equal(newer('0.160.0','0.161.0'),false); assert.equal(newer('x','0.1.0'),null);
+    assert.equal((await latestVersion('codex','standalone',f.home,async () => '{"tag_name":"rust-v0.160.0"}')).version,'0.160.0');
+    fs.writeFileSync(path.join(f.home,'.claude/settings.json'),'{"autoUpdatesChannel":"stable"}');
+    await latestVersion('claude','native',f.home,async url => { assert.match(url,/\/stable$/); return '2.1.280'; });
+    await assert.rejects(latestVersion('agy','native',f.home,async () => '{"version":"evil;command"}'));
+  } finally { f.close(); }
+});
+test('確認中の適用結果を古い確認で上書きせず、各CLIの現在版を数値抽出する', async () => {
+  const f=fixture();
+  try {
+    let release; const gate=new Promise(r=>{release=r;});
+    const tools=new AiTools({root:f.root,home:f.home,find:()=>'/fixture/cli',methods:{codex:'standalone'},
+      run:async (file,args)=>args[0]==='debug'?codexJson([['gpt-6.1-sol','GPT-6.1-Sol']]):'0.159.0 (CLI)',latest:async()=>{await gate;return {version:'0.160.0',source:'fixture'};}});
+    assert.equal(await tools.version('claude','/fixture/cli'), '0.159.0');
+    assert.equal(await tools.version('agy','/fixture/cli'), '0.159.0');
+    const pending=tools.checkUpdate('codex'); await new Promise(r=>setImmediate(r));
+    await tools.update('codex'); release();
+    await assert.rejects(pending,e=>e.status===409); assert.equal(tools.updateChecks.codex,undefined);
+  } finally {f.close();}
+});
 
 function fixture() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-ai-tools-'));

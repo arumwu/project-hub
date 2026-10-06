@@ -2,13 +2,13 @@
 // roles.yaml の読み書き。roles: の中だけを書き換え、それ以外の行（コメントを含む）は残す
 const fs = require('fs');
 const { parseYaml } = require('./frontmatter');
-const { MODEL_FLAG } = require('./launch');
+const { MODEL_FLAG, AGY_MODEL } = require('./launch');
 
 const EFFORTS = ['中', '高', '極高', 'MAX', 'Ultra'];
 const AIS = ['claude-code', 'codex', '人'];
-let discovered = { 'claude-code': [], codex: [] };
+let discovered = { 'claude-code': [], codex: [], agy: [] };
 function setModelCatalog(catalog) {
-  discovered = { 'claude-code': catalog.claude?.models || [], codex: catalog.codex?.models || [] };
+  discovered = { 'claude-code': catalog.claude?.models || [], codex: catalog.codex?.models || [], agy: (catalog.agy?.models || []).filter(x => x.id === AGY_MODEL.id) };
 }
 
 const cliOf = ai => (ai === 'codex' ? 'codex' : 'claude');
@@ -23,7 +23,7 @@ function currentName(ai, name) {
 // 画面で使いやすい形にする
 function normalize(raw) {
   const source = raw.models || {};
-  const models = { ...source, 'claude-code': [...(source['claude-code'] || [])], codex: [...(source.codex || [])] };
+  const models = { ...source, 'claude-code': [...(source['claude-code'] || [])], codex: [...(source.codex || [])], agy: discovered.agy.map(x => x.label) };
   for (const [ai, cli] of [['claude-code', 'claude'], ['codex', 'codex']]) {
     // CLI から今のモデル一覧が取れている時は、それだけを並べる（古い呼び名は出さない）。
     // roles.yaml の名前が同じモデルを指していれば、その名前を使う（役割の設定がそのまま通るように）
@@ -84,10 +84,18 @@ function render(roles) {
   return roles.map(r => `  ${r.name}: { main: ${fmtSlot(r.main)}, backup: ${fmtSlot(r.backup)}, job: ${r.job} }`).join('\n');
 }
 
+// roles.yaml は1回の一覧で何度も読まれる。更新時刻と大きさが同じなら、前に読んで分けた物を使う
+let last = null;
 function read(file) {
-  let text = '';
-  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return { text: '', data: normalize({}) }; }
-  return { text, data: normalize(parseYaml(text)) };
+  let st;
+  try { st = fs.statSync(file); } catch (e) { last = null; return { text: '', data: normalize({}) }; }
+  const key = `${file}:${st.mtimeMs}:${st.size}`;
+  if (!last || last.key !== key) {
+    let text = '';
+    try { text = fs.readFileSync(file, 'utf8'); } catch (e) { last = null; return { text: '', data: normalize({}) }; }
+    last = { key, text, raw: parseYaml(text) };
+  }
+  return { text: last.text, data: normalize(last.raw) };
 }
 
 // roles: ブロックだけ差し替えて保存

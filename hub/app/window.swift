@@ -5,6 +5,7 @@
 // - 何か失敗したら、黙らずに画面に理由を出す。記録は ~/Library/Logs/ProjectHub.log
 import Cocoa
 import WebKit
+import UniformTypeIdentifiers
 
 let home = FileManager.default.homeDirectoryForCurrentUser.path
 let logPath = home + "/Library/Logs/ProjectHub.log"
@@ -153,10 +154,61 @@ class DropWebView: WKWebView {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
+// 横に開く ChatGPT（ブラウザ版）。ログインは Mac に残る（次からはそのまま使える）
+// Hub は ChatGPT の画面を操作しない。人が［コピー］を押した時だけ、その文を Hub に知らせる
+class GptPanel: NSObject, WKNavigationDelegate, WKUIDelegate {
+    let web: WKWebView
+    override init() {
+        let conf = WKWebViewConfiguration()
+        conf.websiteDataStore = .default()
+        web = WKWebView(frame: .zero, configuration: conf)
+        super.init()
+        web.navigationDelegate = self
+        web.uiDelegate = self
+        web.allowsBackForwardNavigationGestures = true
+        // 普通の Safari として開く（アプリの中の画面だと、ログインを断られることがあるため）
+        web.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+        web.load(URLRequest(url: URL(string: "https://chatgpt.com/")!))
+    }
+    // ログインなどの別窓は、同じ欄の中で開く
+    func webView(_ w: WKWebView, createWebViewWith c: WKWebViewConfiguration, for a: WKNavigationAction, windowFeatures f: WKWindowFeatures) -> WKWebView? {
+        if let u = a.request.url { w.load(URLRequest(url: u)) }
+        return nil
+    }
+}
+
+class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
     var window: NSWindow!
     var web: WKWebView!
     var server: Process?
+    var split: NSSplitView!
+    var gpt: GptPanel?
+    var clipTimer: Timer?
+    var clipCount = NSPasteboard.general.changeCount
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?, initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (String?) -> Void) {
+        let alert = NSAlert(); alert.messageText = prompt
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        input.stringValue = defaultText ?? ""; alert.accessoryView = input
+        alert.addButton(withTitle: "保存"); alert.addButton(withTitle: "キャンセル")
+        alert.window.initialFirstResponder = input
+        alert.beginSheetModal(for: window) { completionHandler($0 == .alertFirstButtonReturn ? input.stringValue : nil) }
+    }
+
+    // WebKitは標準のJavaScript確認ダイアログを自動では出さない。
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        let alert = NSAlert(); alert.messageText = message
+        alert.addButton(withTitle: "確認して進む"); alert.addButton(withTitle: "キャンセル")
+        alert.beginSheetModal(for: window) { completionHandler($0 == .alertFirstButtonReturn) }
+    }
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        let alert = NSAlert(); alert.messageText = message; alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window) { _ in completionHandler() }
+    }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         log("アプリを開きました（本体の場所: \(hubDir)）")
@@ -164,12 +216,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         conf.applicationNameForUserAgent = "ProjectHubApp/1"   // 画面側で「アプリの中」と分かるように
         web = DropWebView(frame: .zero, configuration: conf)
         web.navigationDelegate = self
+        web.uiDelegate = self
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 860),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "Project Hub"
         window.minSize = NSSize(width: 720, height: 480)
-        window.contentView = web
+        split = NSSplitView()
+        split.isVertical = true
+        split.dividerStyle = .thin
+        split.addArrangedSubview(web)
+        window.contentView = split
         window.center()
         window.setFrameAutosaveName("ProjectHubMain")
         window.makeKeyAndOrderFront(nil)
@@ -181,7 +238,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     }
 
     func startAndLoad() {
-        // 本体がもう動いていても、書類フォルダを読んでみる（許可の確認を出すため）
+        // 本体が台帳を読めている時は、その画面を先に開く。
+        // 書類フォルダの確認がOS側で待たされても、稼働中の本体を表示できる。
+        if serverAlive() && serverCanRead() {
+            log("台帳を読める本体が動いています")
+            DispatchQueue.main.async { self.web.load(URLRequest(url: baseURL)) }
+            return
+        }
+        // 本体を新しく起動する時は、書類フォルダの許可を確かめる
         let appCanRead = canRead(home + "/Documents")
         if !appCanRead { log("書類フォルダを読めません（許可が無い可能性）") }
         // 本体が前の起動のまま動いていて、許可が効いていない時は、止めてこのアプリから起動し直す
@@ -253,8 +317,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         let main = NSMenu()
         let appItem = NSMenuItem(); main.addItem(appItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "再読み込み", action: #selector(reload), keyEquivalent: "r")
+        let reloadItem = appMenu.addItem(withTitle: "再読み込み", action: #selector(reload), keyEquivalent: "r")
+        reloadItem.target = self
         appMenu.addItem(withTitle: "記録を開く", action: #selector(openLog), keyEquivalent: "l")
+        let gptItem = appMenu.addItem(withTitle: "横の ChatGPT を開く・閉じる", action: #selector(toggleGpt), keyEquivalent: "g")
+        gptItem.keyEquivalentModifierMask = [.command, .shift]
+        gptItem.target = self
         appMenu.addItem(withTitle: "ファイルの許可を確かめる…", action: #selector(checkAccess), keyEquivalent: "")
         appMenu.addItem(withTitle: "ファイルの許可をやり直す（確認をもう一度出す）…", action: #selector(redoAccess), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
@@ -266,10 +334,85 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         edit.addItem(withTitle: "取り消す", action: Selector(("undo:")), keyEquivalent: "z")
         edit.addItem(withTitle: "カット", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         edit.addItem(withTitle: "コピー", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: "ペースト", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        let pasteItem = edit.addItem(withTitle: "ペースト", action: #selector(pasteFromMenu), keyEquivalent: "v")
+        pasteItem.target = self
         edit.addItem(withTitle: "すべてを選択", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = edit
         NSApp.mainMenu = main
+    }
+
+    // WKWebViewではファイル選択の窓をアプリ側で出す。
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        let panel = NSOpenPanel()
+        panel.message = "参照する画像を選んでください（最大10枚）"
+        panel.title = "画像を選ぶ"
+        panel.prompt = "追加する"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.allowedContentTypes = ["png", "jpg", "jpeg", "webp", "gif", "heic"].compactMap { UTType(filenameExtension: $0) }
+        panel.beginSheetModal(for: window) { response in completionHandler(response == .OK ? panel.urls : nil) }
+    }
+
+    // スクショ・プレビューからの画像コピーをPNGにして渡す。文字の貼り付けはWebKitへ。
+    @objc func pasteFromMenu() {
+        // prompt の入力欄は WebKit ではなく、シートのフィールドエディタ。
+        // ⌘V・編集メニューとも、名前を編集中ならその入力欄へ貼る。
+        if let sheet = window.attachedSheet,
+           let editor = sheet.firstResponder as? NSTextView, editor.isFieldEditor {
+            editor.paste(self)
+            return
+        }
+        // 横の ChatGPT を操作している時は、そちらにそのまま貼る（画像も ChatGPT 側が受け取る）
+        if let g = gpt, let r = window.firstResponder as? NSView, r.isDescendant(of: g.web) {
+            NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: self)
+            return
+        }
+        let pasteboard = NSPasteboard.general
+        if let image = NSImage(pasteboard: pasteboard), let tiff = image.tiffRepresentation,
+           let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("hub-paste-" + UUID().uuidString + ".png")
+            do {
+                try png.write(to: url)
+                web.callAsyncJavaScript("return window.hubNativePaste ? await window.hubNativePaste(paths) : false;",
+                                        arguments: ["paths": [url.path]], in: nil, in: .page) { result in
+                    // 始める欄へコピー済みの一時画像だけを片付ける。作業画面の参照元は残す。
+                    if case .success(let value) = result, value as? Bool == true { try? FileManager.default.removeItem(at: url) }
+                }
+            } catch { log("貼り付け画像を保存できません: \(error)") }
+            return
+        }
+        web.perform(#selector(NSText.paste(_:)), with: nil)
+    }
+
+    @objc func toggleGpt() { showGpt(gpt == nil || gpt!.web.superview == nil) }
+    // 横の ChatGPT を開く・閉じる。開いている間だけ、ChatGPT の中でコピーした文を Hub に知らせる
+    func showGpt(_ open: Bool) {
+        if open {
+            if gpt == nil { gpt = GptPanel() }
+            guard let g = gpt, g.web.superview == nil else { return }
+            split.addArrangedSubview(g.web)
+            split.adjustSubviews()
+            split.setPosition(split.bounds.width * 0.55, ofDividerAt: 0)
+            clipCount = NSPasteboard.general.changeCount
+            clipTimer?.invalidate()
+            clipTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in self?.checkClip() }
+            log("横の ChatGPT を開きました")
+        } else {
+            gpt?.web.removeFromSuperview()
+            clipTimer?.invalidate(); clipTimer = nil
+            log("横の ChatGPT を閉じました")
+        }
+    }
+    func checkClip() {
+        let pb = NSPasteboard.general
+        if pb.changeCount == clipCount { return }
+        clipCount = pb.changeCount
+        // ChatGPT の欄で操作していた時のコピーだけ（他のアプリや Hub の画面でのコピーは知らせない）
+        guard let g = gpt, let r = window.firstResponder as? NSView, r.isDescendant(of: g.web),
+              let text = pb.string(forType: .string), !text.isEmpty else { return }
+        web.callAsyncJavaScript("window.hubGptClip && window.hubGptClip(text)", arguments: ["text": text], in: nil, in: .page, completionHandler: nil)
     }
 
     @objc func reload() {
@@ -354,6 +497,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         if let u = a.request.url, u.scheme == "hubapp" {
             if u.host == "access" { askAccess(reset: (u.query ?? "").contains("reset=1")) }
             if u.host == "reveal" { revealFromPage(u) }
+            if u.host == "gpt" { showGpt((u.query ?? "").contains("open=0") ? false : true) }
             decisionHandler(.cancel); return
         }
         if let u = a.request.url, let host = u.host, host != "127.0.0.1", host != "localhost",

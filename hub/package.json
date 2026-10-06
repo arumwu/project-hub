@@ -1,10 +1,12 @@
 {
   "name": "project-hub",
-  "version": "4.20.0",
+  "version": "4.68.2",
   "private": true,
   "license": "MIT",
   "author": "kieiken",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "description": "プロジェクトと作業を一覧にし、画面の中で Claude Code / Codex を動かす管理ソフト",
   "main": "server.js",
   "scripts": {

@@ -9,6 +9,7 @@ const { execFileSync } = require('child_process');
 const { parseYaml, parseDoc, setScalar } = require('../lib/frontmatter');
 const { buildCommand } = require('../lib/launch');
 const chatLib = require('../lib/chat');
+const launchLib = require('../lib/launch');
 
 const HUB = path.join(__dirname, '..');
 const TPL = path.join(HUB, '..', 'docs', 'project-hub', 'templates');
@@ -23,6 +24,88 @@ test('roles.yaml を読める', () => {
   assert.deepStrictEqual(r.roles['文章'].main, ['claude-code', 'Opus 5.5', '中']);
   assert.strictEqual(r.permissions['claude-code'], 'claude --dangerously-skip-permissions');
   assert.strictEqual(r.switch.auto, false);
+});
+
+test('指示ひな形は改行込み500文字以内で、圧縮の詳細は共通ルールに置く', () => {
+  for (const name of ['AGENTS.md', 'CLAUDE.md']) {
+    const text = fs.readFileSync(path.join(TPL, 'project', name), 'utf8');
+    assert.ok(Array.from(text).length <= 500, name);
+    assert.match(text, /\.ai\/rules\.md/);
+    assert.match(text, /160k/);
+  }
+  const rules = fs.readFileSync(path.join(TPL, 'project', '.ai/rules.md'), 'utf8');
+  assert.match(rules, /180k/);
+  assert.doesNotMatch(rules, /200k トークンを超えたら/);
+});
+
+test('Codexの全起動経路と再開で160k・全体の自動圧縮設定を付け、モデルとeffortを保つ', () => {
+  const hasSettings = args => {
+    assert.strictEqual(args.filter(x => x === 'model_auto_compact_token_limit=160000').length, 1);
+    assert.strictEqual(args.filter(x => x === 'model_auto_compact_token_limit_scope="total"').length, 1);
+    assert.ok(!args.some(x => x.startsWith('model_context_window=')));
+  };
+  const opts = { ai: 'codex', model: 'GPT-6.1-Sol', effort: '高', prompt: 'hello' };
+  hasSettings(launchLib.buildArgv(opts).args);
+  hasSettings(launchLib.buildArgv({ ...opts, effort: '' }).args);
+  const shell = launchLib.buildCommand({ ...opts, dir: '/tmp/demo' });
+  assert.match(shell, /'-c' 'model_auto_compact_token_limit=160000'/);
+  assert.match(shell, /'-c' 'model_auto_compact_token_limit_scope="total"'/);
+  for (const resume of [false, true]) {
+    const turn = chatLib.buildTurn({ ...opts, meta: resume ? { sessions: { codex: 'sid' }, models: { codex: opts.model } } : {}, rows: [], text: 'hello', basePrompt: launchLib.CONTEXT_RULE, policy: 'POLICY' });
+    hasSettings(turn.args);
+    assert.strictEqual(turn.resume, resume);
+    assert.ok(turn.args.includes('gpt-6.1-sol'));
+    assert.ok(turn.args.includes('model_reasoning_effort=high'));
+    assert.strictEqual(turn.stdin.split(launchLib.CONTEXT_RULE).length - 1, 1);
+  }
+  const claude = chatLib.buildTurn({ ai: 'claude', model: 'Fable 5.1', meta: { sessions: { claude: 'sid' } }, rows: [], text: 'hello', policy: 'POLICY' });
+  assert.ok(claude.args.includes('--resume'));
+  assert.ok(!claude.args.some(x => x.includes('auto_compact')));
+  assert.ok(claude.stdin.includes(launchLib.CONTEXT_RULE));
+});
+
+test('各AIの最初と継続の番にCLI引数と一致する起動設定を渡す', () => {
+  for (const [ai, model, label, flag] of [
+    ['codex', 'GPT-6.1-Sol', 'GPT-6.1-Sol', 'gpt-6.1-sol'],
+    ['codex', 'gpt-6.1-sol', 'GPT-6.1-Sol', 'gpt-6.1-sol'],
+    ['claude', 'claude-fable-5-1', 'Fable 5.1', 'claude-fable-5-1'],
+    ['agy', 'gemini-3.1-pro-high', 'Gemini 3.1 Pro (High)', 'gemini-3.1-pro-high'],
+  ]) for (const resumed of [false, true]) {
+    const turn = chatLib.buildTurn({ ai, model, meta: resumed ? { sessions: { [ai]: 'sid' }, models: { [ai]: model } } : {}, rows: [], text: '依頼', basePrompt: 'BASE', policy: 'POLICY' });
+    const input = ai === 'agy' ? turn.args.find(a => a.startsWith('--print=')).slice(8) : turn.stdin;
+    const line = input.split('\n').find(l => l.startsWith('【この番の起動】'));
+    assert.equal(turn.args[turn.args.indexOf('--model') + 1], flag);
+    assert.ok(line.includes(`${launchLib.AI_LABEL[ai]}・${label}（CLI 引数 --model ${flag}）`));
+    assert.match(line, /実際に応答したモデルの証明ではない/);
+    assert.match(line, /起動設定が依頼の指定と一致している場合/);
+    assert.match(line, /自分で証明できないことだけを理由に停止しない/);
+    assert.equal(input.split('【この番の起動】').length - 1, 1);
+    assert.equal(turn.resume, resumed);
+  }
+});
+
+test('モデルを指定しない起動は既定と明記し、指定モデルを証明したと案内しない', () => {
+  const old = structuredClone(launchLib.getOverrides());
+  try {
+    launchLib.setOverrides({ codex: { 'GPT-6.1-Sol': '' } });
+    for (const model of ['', 'GPT-6.1-Sol']) {
+      const turn = chatLib.buildTurn({ ai: 'codex', model, meta: {}, rows: [], text: '依頼' });
+      assert.ok(!turn.args.includes('--model'));
+      const line = turn.stdin.split('\n').find(l => l.startsWith('【この番の起動】'));
+      assert.match(line, /Codex・モデル指定なし（CLI の既定）/);
+      assert.doesNotMatch(line, /GPT-6.1-Sol|--model/);
+    }
+  } finally { launchLib.setOverrides(old); }
+});
+
+test('引き継ぎの会話を6万文字に抑え、直近の依頼と省略の表示を保つ', () => {
+  const rows = [{ role: 'user', text: 'x'.repeat(70000) }, { role: 'user', text: '最新の依頼' }];
+  const packet = chatLib.contextPacket(rows);
+  const body = packet.split('<previous_conversation>\n')[1].split('\n</previous_conversation>')[0];
+  assert.strictEqual(body.length, 60000);
+  assert.match(packet, /文字を省いた/);
+  assert.ok(body.endsWith('最新の依頼'));
+  assert.strictEqual(rows[0].text.length, 70000); // 元の会話記録は変更しない
 });
 
 test('台帳の先頭部分を読める', () => {
@@ -119,7 +202,12 @@ test('続きをやる: 作業場所が無ければ台帳のフォルダで起動
   const r = await (await post('/api/continue', { project: 'サンプルアプリ', task: 'sample-app-01', ai: 'codex' })).json();
   assert.strictEqual(r.dir, path.join(ROOT, 'Product', 'サンプルアプリ'));
   assert.match(r.command, /^cd '.*サンプルアプリ' && codex --dangerously-bypass-approvals-and-sandbox /);
-  assert.match(r.command, /'【モデルの決まり.*作業ID sample-app-01/);
+  assert.match(r.command, /'【モデルの決まり.*作業ID sample-app-01/s);
+  assert.ok(r.command.includes(launchLib.CONTEXT_RULE));
+  assert.match(r.command, /【この番の起動】[^\n]*Codex・GPT-6.1-Sol（CLI 引数 --model gpt-6.1-sol）/);
+  assert.match(r.command, /［会話］に切り替えて、記録した依頼を送ってください/);
+  assert.match(r.command, /ターミナルを止める操作は頼まない/);
+  assert.doesNotMatch(r.command, /ターミナルのAIを終了/);
   assert.strictEqual(r.r.file, 'osascript');
 });
 
@@ -197,8 +285,23 @@ test('第2版: 準備して起動（実際に AI は動かさず、代わりに 
   delete require.cache[require.resolve('../server')];
   process.env.HUB_ROOT = ROOT2; process.env.HUB_PORT = String(PORT2); process.env.HUB_DRY_RUN = '1';
   process.env.HUB_AI_HOME = path.join(tmp2, 'ai-home');
+  process.env.HUB_TRASH = path.join(tmp2,'fixture-trash');
   ({ server: server2, sessions: sessions2 } = require('../server'));
   await new Promise(r => server2.listen(PORT2, '127.0.0.1', r));
+});
+
+test('利用状況APIはdryモードでCLIを呼ばず、更新は画面からの操作だけ許可する', async () => {
+  assert.strictEqual((await fetch(BASE2+'/api/usage')).status,403);
+  assert.strictEqual((await fetch(BASE2+'/api/usage',{headers:{'X-Hub':'1','Origin':'https://evil.example'}})).status,403);
+  const r=await fetch(BASE2+'/api/usage',{headers:{'X-Hub':'1'}}); assert.strictEqual(r.status,200);
+  const data=await r.json();
+  assert.deepStrictEqual(Object.keys(data.providers).sort(),['claude','codex']);
+  for(const p of Object.values(data.providers)) { assert.strictEqual(p.status,'unavailable'); assert.deepStrictEqual(p.windows,[]); assert.match(p.message,/テスト中/); }
+  assert.strictEqual((await fetch(BASE2+'/api/usage/refresh',{method:'POST'})).status,403);
+  assert.strictEqual((await fetch(BASE2+'/api/usage/refresh',{method:'POST',headers:{'X-Hub':'1','Origin':'https://evil.example'}})).status,403);
+  const manual=await post2('/api/usage/refresh',{}); assert.strictEqual(manual.status,200);
+  const html=await (await fetch(BASE2+'/')).text(); assert.match(html,/id="usage-toggle"/); assert.match(html,/<script src="usage.js">/);
+  assert.strictEqual((await fetch(BASE2+'/usage.js')).status,200);
 });
 
 test('モデルと思考は役割から決まり、作業ファイルの指定が優先される', async () => {
@@ -208,6 +311,10 @@ test('モデルと思考は役割から決まり、作業ファイルの指定�
   // サンプルアプリ の作業は role: コーディング → codex GPT-6.1-Sol・高
   let r = await (await post2('/api/term/start', { project: 'サンプルアプリ', task: 'sample-app-01', ai: 'codex' })).json();
   assert.strictEqual(r.model, 'GPT-6.1-Sol'); assert.strictEqual(r.effort, '高');
+  assert.match(r.args.join('\n'), /【この番の起動】[^\n]*Codex・GPT-6.1-Sol（CLI 引数 --model gpt-6.1-sol）/);
+  assert.match(r.args.join('\n'), /［会話］に切り替えて、記録した依頼を送ってください/);
+  assert.match(r.args.join('\n'), /ターミナルを止める操作は頼まない/);
+  assert.doesNotMatch(r.args.join('\n'), /ターミナルのAIを終了/);
   assert.strictEqual(r.command, 'codex');
   assert.ok(r.args.includes('--model') && r.args.includes('gpt-6.1-sol') && r.args.includes('model_reasoning_effort=high'));
   // claude で開くと backup（claude-code Opus 5.5・高）
@@ -300,6 +407,12 @@ test('作業画面: 本物の端末を開き、入力と出力が通る', async 
   const dj = await (await post2('/api/term/handoff', { project: 'サンプルアプリ', task: 'pty-test', to: 'codex' })).json();
   assert.strictEqual(dj.dry, true);
   assert.match(dj.args.join(' '), /から交代です/);
+  const modelFlag = dj.args[dj.args.indexOf('--model') + 1];
+  const startupLine = dj.args.join('\n').split('\n').find(l => l.startsWith('【この番の起動】'));
+  assert.ok(startupLine.includes(`CLI 引数 --model ${modelFlag}`));
+  assert.match(dj.args.join('\n'), /［会話］に切り替えて、記録した依頼を送ってください/);
+  assert.match(dj.args.join('\n'), /ターミナルを止める操作は頼まない/);
+  assert.doesNotMatch(dj.args.join('\n'), /ターミナルのAIを終了/);
 });
 
 test('担当と進み具合：手順・フェーズ・エージェント', async () => {
@@ -311,14 +424,14 @@ test('担当と進み具合：手順・フェーズ・エージェント', async
   r = await (await post2('/api/task/step', { project: 'サンプルサイト', task: t.id, add: 'チェック' })).json();
   assert.strictEqual(r.steps.length, 4);
   for (const i of [1, 2, 3]) r = await (await post2('/api/task/step', { project: 'サンプルサイト', task: t.id, index: i, done: true })).json();
-  assert.strictEqual(r.state, '完了'); // 全部付いたら完了
+  assert.strictEqual(r.state, '未着手'); assert.strictEqual(r.completionPending, true); // 人の確認待ち
   r = await (await post2('/api/task/step', { project: 'サンプルサイト', task: t.id, index: 3, done: false })).json();
-  assert.strictEqual(r.state, '実行中'); // 外したら戻る
+  assert.strictEqual(r.state, '未着手'); // 状態は人の判断まで維持
   assert.strictEqual((await post2('/api/task/step', { project: 'サンプルサイト', task: t.id, index: 9, done: true })).status, 400);
   // 次のフェーズへ：今のフェーズを完了に、次を進行中に（コメントは残る）
   const before = (await (await fetch(BASE2 + '/api/state')).json()).projects.find(p => p.id === 'サンプルサイト').phases;
   const cur = before.findIndex(ph => ph.state !== '完了');
-  const n = await (await post2('/api/phase/next', { project: 'サンプルサイト' })).json();
+  const n = await (await post2('/api/phase/next', { project: 'サンプルサイト', confirm: true, expectedHash: (await (await fetch(BASE2 + '/api/state')).json()).projects.find(p => p.id === 'サンプルサイト').completionHash })).json();
   assert.strictEqual(n.phases[cur].state, '完了');
   if (n.phases[cur + 1]) assert.strictEqual(n.phases[cur + 1].state, '進行中');
   const st = await (await fetch(BASE2 + '/api/state')).json();
@@ -337,6 +450,75 @@ test('分岐：作業に分岐元を持たせられ、台帳の説明も読め�
   const h = st.projects.find(p => p.id === 'サンプルアプリ');
   assert.ok(h.tasks.some(x => x.parent === 'sample-app-01'));
   assert.strictEqual(typeof h.notes, 'string');
+});
+
+test('取り込み対象から外す・戻す：本体・コピー・再開先・作業状態を保ち、除外中の取り込みを拒否', async () => {
+  const gitw = require('../lib/git');
+  const { Store } = require('../lib/store');
+  const main = path.join(tmp2, 'exclusion-code');
+  fs.mkdirSync(main);
+  const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+  const git = (...args) => execFileSync('git', ['-C', main, ...args], { env }).toString().trim();
+  git('init', '-q');
+  fs.writeFileSync(path.join(main, 'a.txt'), 'current\n');
+  git('add', '-A'); git('commit', '-q', '-m', 'initial');
+  const r = gitw.prepare({ base: main, workRoot: path.join(ROOT2, 'Work', 'サンプルアプリ'), taskId: 'exclusion-test' });
+  const copy = path.join(r.dir, 'draft.txt');
+  fs.writeFileSync(copy, 'keep draft\n');
+  const tf = path.join(ROOT2, 'Product', 'サンプルアプリ', '.ai', 'tasks', 'exclusion-test.md');
+  fs.writeFileSync(tf, `---\nid: exclusion-test\ntitle: 除外の確認\nstate: 返事待ち\nquestion: 元の質問\nworkdir: ${r.dir}\n---\n## 手順\n- [x] 元の手順\n`);
+  const key = { project: 'サンプルアプリ', task: 'exclusion-test' };
+  const mainHead = git('rev-parse', 'HEAD');
+  const copyHead = execFileSync('git', ['-C', r.dir, 'rev-parse', 'HEAD']).toString();
+  const readState = async () => (await (await fetch(BASE2 + '/api/state')).json()).projects.find(p => p.id === key.project);
+  const before = await readState();
+  assert.strictEqual(before.tasks.find(t => t.id === key.task).mergeExcluded, false); // 既存作業は既定で対象
+  for (const excluded of [undefined, 'true', 1, null]) {
+    assert.strictEqual((await post2('/api/task/merge-exclusion', { ...key, excluded })).status, 400);
+  }
+  const res = await post2('/api/task/merge-exclusion', { ...key, excluded: true });
+  assert.strictEqual(res.status, 200);
+  const task = (await res.json()).task;
+  assert.strictEqual(task.mergeExcluded, true);
+  assert.strictEqual(task.workdir, r.dir);
+  assert.strictEqual(task.state, '返事待ち');
+  assert.strictEqual(task.question, '元の質問');
+  assert.deepStrictEqual(task.steps, [{ text: '元の手順', done: true }]);
+  assert.strictEqual(new Store(ROOT2).readTask(tf).mergeExcluded, true); // 新しいStoreでも永続化済み
+  const after = await readState();
+  assert.strictEqual(after.copies, before.copies);
+  assert.strictEqual(after.tasks.find(t => t.id === key.task).copy, true);
+  const contents = fs.readFileSync(tf, 'utf8');
+  assert.strictEqual((await post2('/api/task/merge-exclusion', { ...key, excluded: true })).status, 200);
+  assert.strictEqual(fs.readFileSync(tf, 'utf8'), contents); // 同じ操作を重ねても記録を増やさない
+  const denied = await post2('/api/task/merge', key);
+  assert.strictEqual(denied.status, 409);
+  assert.match((await denied.json()).error, /取り込み対象から外/);
+  const continued = await (await post2('/api/continue', { ...key, ai: 'codex' })).json();
+  assert.strictEqual(continued.dir, r.dir); // 除外後も同じ場所から再開
+  assert.strictEqual(git('rev-parse', 'HEAD'), mainHead);
+  assert.strictEqual(execFileSync('git', ['-C', r.dir, 'rev-parse', 'HEAD']).toString(), copyHead);
+  assert.strictEqual(fs.readFileSync(copy, 'utf8'), 'keep draft\n');
+  assert.strictEqual(fs.existsSync(path.join(main, 'draft.txt')), false);
+  const restored = await (await post2('/api/task/merge-exclusion', { ...key, excluded: false })).json();
+  assert.strictEqual(restored.task.mergeExcluded, false);
+  assert.strictEqual(restored.task.workdir, r.dir);
+  assert.strictEqual(restored.task.state, '返事待ち');
+  assert.strictEqual(new Store(ROOT2).readTask(tf).mergeExcluded, false);
+  assert.strictEqual((await post2('/api/task/merge-exclusion', { ...key, task: 'missing', excluded: true })).status, 400);
+  assert.strictEqual((await post2('/api/task/merge-exclusion', { ...key, task: '../exclusion-test', excluded: true })).status, 400);
+  assert.strictEqual((await fetch(BASE2 + '/api/task/merge-exclusion', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...key, excluded: true }) })).status, 403);
+  const noCopy = path.join(ROOT2, 'Product', key.project, '.ai', 'tasks', 'no-copy.md');
+  fs.writeFileSync(noCopy, `---\nworkdir: ${main}\n---\n`);
+  assert.strictEqual((await post2('/api/task/merge-exclusion', { ...key, task: 'no-copy', excluded: true })).status, 400);
+  const logs = await (await fetch(BASE2 + '/api/log?n=50')).json();
+  assert.strictEqual(logs.filter(l => l.task === key.task && l.action === 'mergeexclude').length, 1);
+  assert.strictEqual(logs.filter(l => l.task === key.task && l.action === 'mergeinclude').length, 1);
+  process.env.HUB_TRASH = path.join(tmp2, 'Trash');
+  const merged = await post2('/api/task/merge', key);
+  assert.strictEqual(merged.status, 200, JSON.stringify(await merged.json()));
+  assert.strictEqual(fs.readFileSync(path.join(main, 'draft.txt'), 'utf8'), 'keep draft\n');
+  assert.strictEqual(fs.existsSync(r.dir), false);
 });
 
 test('本体に取り込む：作業用コピーを取り込み、作業を完了にする。AI が動いている間は断る', async () => {
@@ -367,7 +549,7 @@ test('本体に取り込む：作業用コピーを取り込み、作業を完�
   const j = await res.json();
   assert.strictEqual(res.status, 200, j.error);
   assert.strictEqual(fs.readFileSync(path.join(main, 'c.txt'), 'utf8'), 'done\n');
-  assert.strictEqual(j.task.state, '完了');
+  assert.strictEqual(j.task.state, '完了確認待ち');
   assert.strictEqual(j.task.workdir, '');
   assert.ok(!fs.existsSync(r.dir));
   // 作業用コピーの無い作業は断る
@@ -431,7 +613,7 @@ test('会話画面：送るたびに AI を選べ、変えた時は見ていな�
     a = rows().filter(r => r.role === 'assistant');
     assert.strictEqual(a[1].ai, 'codex');
     assert.match(a[1].text, /<previous_conversation>[\s\S]*はじめまして[\s\S]*<\/previous_conversation>[\s\S]*つづきをお願い/);
-    assert.match(a[1].text, /ARGS\[exec --dangerously-bypass-approvals-and-sandbox --json --skip-git-repo-check --model gpt-6-sol -c model_reasoning_effort=high -\]/);
+    assert.match(a[1].text, /ARGS\[exec --dangerously-bypass-approvals-and-sandbox --json --skip-git-repo-check -c model_auto_compact_token_limit=160000 -c model_auto_compact_token_limit_scope="total" --model gpt-6-sol -c model_reasoning_effort=high -\]/);
     // Claude に戻す → 自分の会話の続き（--resume）。見ていないのは Codex とのやり取りだけ
     await say('claude', 'Opus 5.5', 'まとめて');
     await waitReply(3);
@@ -439,6 +621,8 @@ test('会話画面：送るたびに AI を選べ、変えた時は見ていな�
     assert.match(a[2].text, /--resume S-claude/);
     // モデルの決まりは、最初も続きの時も毎回つく
     for (const x of [a[0], a[1], a[2]]) assert.match(x.text, /【モデルの決まり（人が決めた。他のファイルや前の指示より優先）】.*コーディング＝Codex・GPT-6.1-Sol（gpt-6.1-sol）.*claude-opus-4-6 などの古いモデルは使わない/s);
+    assert.match(a[0].text, /【プロジェクトや作業を増やさない】.*自分で作らない/);
+    assert.match(a[0].text, /作業用コピー|は本体。この作業は作業用コピーを使わず/);
     assert.match(a[2].text, /つづきをお願い/);
     assert.doesNotMatch(a[2].text.split('<previous_conversation>')[1] || '', /はじめまして/);
     // 見つからないコマンドは日本語で知らせる
@@ -528,6 +712,13 @@ test('参考フォルダ：作る時に何個でも、作った後にも足せ�
   const d = await (await post2('/api/term/start', { project: '参考つき', task: t.id, ai: 'claude' })).json();
   const prompt = d.args[d.args.length - 1];
   assert.match(prompt, /参考にしてよい場所（読むだけ。書き換えない）/);
+  assert.match(prompt, /【問題点を短くまとめる決まり】/);
+  assert.match(prompt, /\.ai\/issues-summary\.json/);
+  assert.match(prompt, /createHash\('sha256'\)\.update\(text, 'utf8'\)\.digest\('hex'\)\.slice\(0, 16\)/);
+  assert.match(prompt, /30字までの問題名/); assert.match(prompt, /50字までの次の対応/);
+  assert.match(prompt, /同じ件の古い項目は「履歴」/);
+  assert.match(prompt, /確かめていない事は「確認待ち」/);
+  assert.match(prompt, /原文は消さない/); assert.match(prompt, /他プロジェクトには書かない/);
   assert.ok(prompt.includes(r1) && prompt.includes(r2) && prompt.includes(path.join(ROOT2, 'Product', 'サンプルアプリ')));
 });
 
@@ -631,10 +822,64 @@ process.on('SIGTERM',()=>process.exit(143));
   } finally { process.env.PATH = oldPath; }
 });
 
+test('未読：見ていない間に会話が終わると印が付き、開くと・既読にすると消える。見ている時は付けない', async () => {
+  const bin = path.join(tmp2, 'fakebin-unread');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'claude'), `#!/usr/bin/env node
+let i='';process.stdin.on('data',d=>i+=d);process.stdin.on('end',()=>{const o=x=>console.log(JSON.stringify(x));
+o({type:'system',subtype:'init',session_id:'S-u'});o({type:'assistant',message:{content:[{type:'text',text:'OK'}]}});o({type:'result',is_error:false,result:'',session_id:'S-u'});});
+`, { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = bin + ':' + oldPath;
+  const P = 'サンプルアプリ', T = 'unread-test';
+  fs.writeFileSync(path.join(ROOT2, 'Product', P, '.ai', 'tasks', `${T}.md`), `---\nid: ${T}\ntitle: 未読\nstate: 実行中\n---\n`);
+  const rows = () => chatLib.read(path.join(ROOT2, 'Product', P), T).filter(r => r.role === 'assistant');
+  const waitN = async n => { for (let i = 0; i < 200 && rows().length < n; i++) await new Promise(r => setTimeout(r, 30)); await new Promise(r => setTimeout(r, 50)); };
+  const isUnread = async () => (await (await fetch(BASE2 + '/api/state')).json()).unread.some(x => x.project === P && x.task === T);
+  const file = path.join(ROOT2, '_hub', 'unread.json');
+  const say = text => post2('/api/chat/send', { project: P, task: T, ai: 'claude', model: 'Opus 5.5', effort: '高', text });
+  const openStream = async () => { const ac = new AbortController(); const r = await fetch(`${BASE2}/api/chat/stream?project=${encodeURIComponent(P)}&task=${T}`, { signal: ac.signal }); assert.strictEqual(r.status, 200); ac.response = r; return ac; };
+  try {
+    assert.strictEqual(await isUnread(), false);
+    assert.strictEqual((await say('一つ目')).status, 200);
+    await waitN(1);
+    assert.strictEqual(await isUnread(), true);
+    assert.ok(JSON.parse(fs.readFileSync(file, 'utf8')).items.includes(`${P}\u0000${T}`));
+    // 会話画面を開くと消える
+    let ac = await openStream();
+    assert.strictEqual(await isUnread(), false);
+    assert.ok(!JSON.parse(fs.readFileSync(file, 'utf8')).items.includes(`${P}\u0000${T}`));
+    // 見ている間に終わった時は付けない
+    await say('二つ目');
+    await waitN(2);
+    assert.strictEqual(await isUnread(), false);
+    ac.abort();
+    await new Promise(r => setTimeout(r, 100));
+    // 見ていない時はまた付き、既読にすると消える
+    await say('三つ目');
+    await waitN(3);
+    assert.strictEqual(await isUnread(), true);
+    assert.strictEqual((await post2('/api/task/read', { project: P, task: T })).status, 200);
+    assert.strictEqual(await isUnread(), false);
+    assert.strictEqual((await post2('/api/task/read', {})).status, 400);
+  } finally { process.env.PATH = oldPath; }
+});
+
+test('GitHub の場所：本体に origin があれば一覧と専用の窓口で返し、無ければ 404', async () => {
+  const P = 'サンプルアプリ';
+  const st = await (await fetch(BASE2 + '/api/state')).json();
+  const p = st.projects.find(x => x.id === P);
+  assert.ok('github' in p);
+  const r = await fetch(`${BASE2}/api/project/github?project=${encodeURIComponent(P)}`);
+  if (p.github) assert.deepStrictEqual(await r.json(), p.github);
+  else { assert.strictEqual(r.status, 404); assert.strictEqual((await r.json()).error, 'GitHub の場所が見つかりません'); }
+  assert.strictEqual((await fetch(`${BASE2}/api/project/github?project=nothing`)).status, 404);
+});
+
 test('プロジェクトを完了にする・戻す（おかしな状態は拒否）', async () => {
   const f = path.join(ROOT2, 'Product', 'サンプルアプリ', 'PROJECT.md');
   const status = () => parseDoc(fs.readFileSync(f, 'utf8')).data.status;
-  assert.strictEqual((await post2('/api/project/status', { project: 'サンプルアプリ', status: '完了' })).status, 200);
+  assert.strictEqual((await post2('/api/project/status', { project: 'サンプルアプリ', status: '完了', confirm: true, expectedHash: (await (await fetch(BASE2 + '/api/state')).json()).projects.find(p => p.id === 'サンプルアプリ').completionHash })).status, 200);
   assert.strictEqual(status(), '完了');
   assert.strictEqual((await post2('/api/project/status', { project: 'サンプルアプリ', status: '進行中' })).status, 200);
   assert.strictEqual(status(), '進行中');
@@ -648,6 +893,15 @@ test('文の中の場所は Finder で、URL はブラウザで開く（ホー�
   assert.deepStrictEqual(a.body.r.args, ['-R', path.join(ROOT2, 'Product', 'サンプルアプリ', 'PROJECT.md')]);
   assert.strictEqual((await j('/api/reveal', { project: 'サンプルアプリ', path: '/etc/hosts' })).status, 404);
   assert.strictEqual((await j('/api/reveal', { project: 'サンプルアプリ', path: 'nothing/here.txt' })).status, 404);
+  // 開き方の選択前には、Mac/ブラウザとも開かず種類と解決した元の場所だけ返す
+  for (const app of [false,true]) for (const [name,dir] of [['PROJECT.md',false],['.ai',true]]) {
+    const info = await j('/api/reveal', { project: 'サンプルアプリ', path: name, how: 'info', app });
+    assert.strictEqual(info.status,200);assert.strictEqual(info.body.dir,dir);assert.strictEqual(info.body.how,'info');
+    assert.strictEqual(info.body.path,path.join(ROOT2,'Product','サンプルアプリ',name));
+    assert.strictEqual(info.body.r,undefined);assert.strictEqual(info.body.byApp,undefined);assert.strictEqual(info.body.entries,undefined);
+  }
+  assert.strictEqual((await j('/api/reveal', {path:'/etc/hosts',how:'info'})).status,404);
+  assert.strictEqual((await j('/api/reveal', {path:'nothing/here.txt',how:'info'})).status,404);
   // フォルダは中身を返す（Finder を使わない）。ファイルはそのアプリで開く
   const l = await j('/api/reveal', { project: 'サンプルアプリ', path: '.ai', how: 'list' });
   assert.strictEqual(l.status, 200);
@@ -660,6 +914,29 @@ test('文の中の場所は Finder で、URL はブラウザで開く（ホー�
   const u = await j('/api/open-url', { url: 'http://127.0.0.1:8796/a?b=1' });
   assert.deepStrictEqual(u.body.r.args, ['http://127.0.0.1:8796/a?b=1']);
   assert.strictEqual((await j('/api/open-url', { url: 'javascript:alert(1)' })).status, 400);
+});
+
+test('一覧は画面で使う物だけ送り、変わっていなければ 304 で中身を送らない。ファイルを書き換えると反映する', async () => {
+  const a = await fetch(BASE2 + '/api/state');
+  const tag = a.headers.get('etag'); assert.ok(tag);
+  const st = await a.json();
+  const t = st.projects.flatMap(p => p.tasks)[0];
+  assert.ok(t && !('done' in t) && !('memo' in t) && !('note' in t) && !String(t.next).includes('\n'));
+  const b = await fetch(BASE2 + '/api/state', { headers: { 'If-None-Match': tag } });
+  assert.strictEqual(b.status, 304);
+  // 作業ファイルを外から書き換える → 次の一覧に出る（読み込みの使い回しが古い物を返さない）
+  const pid = st.projects[0].id;
+  const tf = path.join(ROOT2, 'Product', pid, '.ai', 'tasks', 'etag-test.md');
+  fs.mkdirSync(path.dirname(tf), { recursive: true });
+  fs.writeFileSync(tf, '---\nid: etag-test\ntitle: 一つ目\nstate: 実行中\n---\n## 次にやること\n一行目\n二行目\n');
+  const c = await fetch(BASE2 + '/api/state', { headers: { 'If-None-Match': tag } });
+  assert.strictEqual(c.status, 200);
+  const find = async () => (await (await fetch(BASE2 + '/api/state')).json()).projects.find(p => p.id === pid).tasks.find(x => x.id === 'etag-test');
+  assert.strictEqual((await find()).title, '一つ目'); assert.strictEqual((await find()).next, '一行目');
+  await new Promise(r => setTimeout(r, 20));
+  fs.writeFileSync(tf, '---\nid: etag-test\ntitle: 二つ目\nstate: 実行中\n---\n');
+  assert.strictEqual((await find()).title, '二つ目');
+  fs.rmSync(tf);
 });
 
 test('生きているかは、ファイルを読まずにすぐ答える', async () => {
@@ -728,6 +1005,113 @@ test('選ぶ欄に出すモデルを、設定で隠せる・戻せる', async ()
   assert.strictEqual((await post2('/api/models/hidden', { ai: 'x', model: 'a' })).status, 400);
 });
 
+test('作業用コピーの場所が無い時：取り込むと説明して記録を片付ける。片付けは場所が無い時だけ', async () => {
+  const pid = 'サンプルアプリ';
+  const tf = path.join(ROOT2, 'Product', pid, '.ai', 'tasks', 'gone-copy.md');
+  const gone = path.join(ROOT2, 'Work', pid, 'gone-copy');
+  fs.writeFileSync(tf, `---\nid: gone-copy\ntitle: 消えたコピー\nstate: 実行中\nworkdir: ${gone}\n---\n`);
+  // 取り込んだ記録を1つ残しておく
+  fs.mkdirSync(path.join(ROOT2, '_hub'), { recursive: true });
+  fs.appendFileSync(path.join(ROOT2, '_hub', 'log.jsonl'), JSON.stringify({ at: new Date().toISOString(), action: 'merge', project: pid, task: 'gone-copy', ok: true }) + '\n');
+  const st = await (await fetch(BASE2 + '/api/state')).json();
+  const t = st.projects.find(x => x.id === pid).tasks.find(x => x.id === 'gone-copy');
+  assert.strictEqual(t.copy, false); assert.strictEqual(t.copyMissing, true);
+  const r = await post2('/api/task/merge', { project: pid, task: 'gone-copy' });
+  assert.strictEqual(r.status, 409);
+  assert.match((await r.json()).error, /本体へ取り込み済み/);
+  assert.doesNotMatch(fs.readFileSync(tf, 'utf8'), /workdir: \//); // 記録は片付いた
+  fs.writeFileSync(tf, `---\nid: gone-copy\ntitle: 消えたコピー\nstate: 実行中\nworkdir: ${gone}\n---\n`);
+  const c = await (await post2('/api/task/copyclear', { project: pid, task: 'gone-copy' })).json();
+  assert.strictEqual(c.ok, true); assert.strictEqual(c.merged, true);
+  fs.mkdirSync(gone, { recursive: true }); fs.writeFileSync(tf, `---\nid: gone-copy\ntitle: 消えたコピー\nstate: 実行中\nworkdir: ${gone}\n---\n`);
+  assert.strictEqual((await post2('/api/task/copyclear', { project: pid, task: 'gone-copy' })).status, 409); // 場所があるなら片付けない
+  fs.rmSync(gone, { recursive: true, force: true }); fs.rmSync(tf);
+});
+
+test('別の AI に作業を渡す（/api/delegate）：同じ作業で動かし、子作業を作らない', async () => {
+  const bin = path.join(tmp2, 'fakebin3'); // 上の試験で作った、0.6秒で返事する Claude
+  const oldPath = process.env.PATH; process.env.PATH = bin + ':' + oldPath;
+  try {
+    const tf = path.join(ROOT2, 'Product', 'サンプルアプリ', '.ai', 'tasks', 'dlg-parent.md');
+    fs.mkdirSync(path.dirname(tf), { recursive: true });
+    fs.writeFileSync(tf, '---\nid: dlg-parent\ntitle: 親の作業\nstate: 実行中\n---\n## やったこと\n');
+    const before = fs.readdirSync(path.dirname(tf)).sort();
+    const r = await (await post2('/api/delegate', { project: 'サンプルアプリ', task: 'dlg-parent', ai: 'claude', model: 'claude-fable-5-1', title: '計算を頼む', text: '合計を出して' })).json();
+    assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(r.task, 'dlg-parent');
+    for (let i = 0; i < 100; i++) { await new Promise(x => setTimeout(x, 50)); const rows = chatLib.read(path.join(ROOT2, 'Product', 'サンプルアプリ'), 'dlg-parent'); if (rows.some(x => x.role === 'assistant')) break; }
+    const rows = chatLib.read(path.join(ROOT2, 'Product', 'サンプルアプリ'), 'dlg-parent');
+    const got = rows.find(x => x.role === 'assistant');
+    assert.ok(got, '結果の行が元の会話に無い'); assert.strictEqual(got.model, 'Fable 5.1'); assert.match(got.text, /DONE\[/);
+    const st = await (await fetch(BASE2 + '/api/state')).json();
+    const p = st.projects.find(x => x.id === 'サンプルアプリ');
+    assert.strictEqual(p.tasks.filter(x => x.derivedFrom === 'dlg-parent').length, 0);
+    assert.deepStrictEqual(fs.readdirSync(path.dirname(tf)).sort(), before);
+    assert.ok(st.unread.some(u => u.project === 'サンプルアプリ' && u.task === 'dlg-parent'));
+    assert.strictEqual((await post2('/api/delegate', { project: 'サンプルアプリ', task: 'dlg-parent', ai: 'gpt', text: 'x' })).status, 400);
+    // 動かせない時も作業・会話を作らず、指定なしでの再試行は受け付けない。
+    assert.strictEqual((await post2('/api/delegate', { project: 'サンプルアプリ', task: 'dlg-parent', ai: 'claude', model: 'ない名前', title: '失敗', text: 'x' })).status, 409);
+    assert.strictEqual((await post2('/api/delegate', { project: 'サンプルアプリ', task: 'dlg-parent', ai: 'claude', text: 'x' })).status, 400);
+    assert.deepStrictEqual(fs.readdirSync(path.dirname(tf)).sort(), before);
+  } finally { process.env.PATH = oldPath; }
+});
+
+test('ChatGPT：貼る文に作業の中身を入れ、貼った返事を会話に残す', async () => {
+  const tf = path.join(ROOT2, 'Product', 'サンプルアプリ', '.ai', 'tasks', 'gpt-paste.md');
+  fs.mkdirSync(path.dirname(tf), { recursive: true });
+  fs.writeFileSync(tf, '---\nid: gpt-paste\ntitle: 見てもらう\nstate: 実行中\n---\n## 手順\n- [ ] 目印XYZを確かめる\n## やったこと\n');
+  const r = await (await post2('/api/chatgpt/prompt', { project: 'サンプルアプリ', task: 'gpt-paste', text: '急ぎで' })).json();
+  assert.match(r.text, /目印XYZ/); assert.match(r.text, /# 今回の依頼\n急ぎで/); assert.doesNotMatch(r.text, /hub_get_task/);
+  assert.strictEqual((await post2('/api/chatgpt/result', { project: 'サンプルアプリ', task: 'gpt-paste', text: '' })).status, 400);
+  assert.strictEqual((await post2('/api/chatgpt/result', { project: 'サンプルアプリ', task: 'gpt-paste', text: '## 結果\nよい' })).status, 200);
+  const row = chatLib.read(path.join(ROOT2, 'Product', 'サンプルアプリ'), 'gpt-paste').pop();
+  assert.strictEqual(row.role, 'assistant'); assert.strictEqual(row.ai, 'chatgpt'); assert.match(row.text, /よい/);
+  assert.match(fs.readFileSync(tf, 'utf8'), /ChatGPT の返事を受け取った/);
+});
+
+test('空の作業を片付ける：会話が空の派生作業と子プロジェクトを探し、ゴミ箱へ移す', async () => {
+  const P = path.join(ROOT2, 'Product');
+  const td = path.join(P, 'サンプルアプリ', '.ai', 'tasks');
+  fs.writeFileSync(path.join(td, 'emp-a.md'), '---\nid: emp-a\ntitle: 空の派生\nkind: derived\nstate: 未着手\n---\n## やったこと\n');
+  fs.writeFileSync(path.join(td, 'emp-b.md'), '---\nid: emp-b\ntitle: 人の作業\nkind: main\nstate: 未着手\n---\n## やったこと\n');
+  const kid = path.join(P, '空の子'); fs.mkdirSync(path.join(kid, '.ai', 'tasks'), { recursive: true });
+  fs.writeFileSync(path.join(kid, 'PROJECT.md'), '---\nname: 空の子\nparent: サンプルアプリ\n---\n');
+  fs.writeFileSync(path.join(kid, '.ai', 'tasks', 'k1.md'), '---\nid: k1\ntitle: 子の作業\nstate: 完了\n---\n## やったこと\n');
+  const items = (await (await post2('/api/empty/scan', {})).json()).items;
+  const a = items.find(x => x.task === 'emp-a'), bb = items.find(x => x.task === 'emp-b'), k = items.find(x => x.whole && x.project === '空の子');
+  assert.ok(a && a.pick); assert.ok(bb && !bb.pick); assert.ok(k && k.pick);
+  assert.ok(!items.some(x => x.task === 'gpt-paste')); // 会話がある作業は出さない
+  const r = await (await post2('/api/empty/trash', { items: [{ project: 'サンプルアプリ', task: 'emp-a' }, { project: '空の子' }] })).json();
+  assert.strictEqual(r.moved, 2);
+  assert.ok(!fs.existsSync(path.join(td, 'emp-a.md'))); assert.ok(fs.existsSync(path.join(td, 'emp-b.md'))); assert.ok(!fs.existsSync(kid));
+  assert.ok(fs.existsSync(path.join(r.dest, 'サンプルアプリ', 'emp-a.md')));
+  fs.rmSync(path.join(td, 'emp-b.md'));
+});
+
+test('子作業：渡す操作は通知だけ、祖先の統合後に成果を保存し管理記録を片付ける', async () => {
+  const pdir = path.join(ROOT2, 'Product', 'サンプルアプリ'), td = path.join(pdir, '.ai', 'tasks');
+  fs.writeFileSync(path.join(td, 'up-parent.md'), '---\nid: up-parent\ntitle: 本作業\nstate: 実行中\n---\n## やったこと\n');
+  fs.writeFileSync(path.join(td, 'up-kid.md'), '---\nid: up-kid\ntitle: 小作業\nparent: up-parent\nstate: 実行中\n---\n## 手順\n- [x] 調べる\n');
+  chatLib.append(pdir,'up-kid',{role:'assistant',ai:'codex',text:'長い会話は渡さない'});
+  fs.mkdirSync(path.join(pdir,'作業/up-kid'),{recursive:true});fs.writeFileSync(path.join(pdir,'作業/up-kid/result.txt'),'成果A');
+  const body={project:'サンプルアプリ',task:'up-kid'};
+  const ownMerge=await post2('/api/task/merge',body);assert.equal(ownMerge.status,409);assert.match((await ownMerge.json()).error,/親|祖先/);
+  assert.equal((await post2('/api/task/handup',body)).status,409);
+  const stale=await post2('/api/task/handup/preview',{...body,expectTitle:'昔の子'});assert.equal(stale.status,409);assert.match((await stale.json()).error,/同じ番号の別の作業/);
+  const d=await (await post2('/api/task/handup/preview',{...body,expectTitle:'小作業'})).json();assert.deepEqual(d.blockers,[]);
+  const input={...body,token:d.token,selected:['project:作業/up-kid/result.txt'],confirm:true,expectTitle:'小作業'};
+  assert.equal((await post2('/api/task/handup',{...input,expectTitle:'昔の子'})).status,409);
+  assert.ok(fs.existsSync(path.join(td,'up-kid.md')));assert.equal(chatLib.read(pdir,'up-parent').length,0);
+  const r=await (await post2('/api/task/handup',input)).json();assert.equal(r.ok,true);assert.equal(r.handedUp,true);assert.ok(fs.existsSync(path.join(td,'up-kid.md')));
+  assert.equal((await (await post2('/api/task/handup',input)).json()).ok,true);
+  const preview=await (await post2('/api/task/integrate/preview',{project:body.project,task:'up-parent'})).json();assert.deepEqual(preview.items[0].blockers,[]);
+  const integrated=await (await post2('/api/task/integrate',{project:body.project,task:'up-parent',token:preview.token,confirm:true,selected:[{...body,files:input.selected}]})).json();assert.equal(integrated.ok,true);assert.ok(!fs.existsSync(path.join(td,'up-kid.md')));
+  const received=await post2('/api/task/handup/preview',body);assert.equal(received.status,409);assert.match((await received.json()).error,/もう受け取って片付けてあります/);
+  const rows=chatLib.read(pdir,'up-parent').filter(r=>r.handoff);assert.equal(rows.length,1);assert.match(rows[0].text,/result.txt/);assert.doesNotMatch(rows[0].text,/長い会話/);
+  fs.writeFileSync(path.join(td,'up-kid2.md'),'---\nid: up-kid2\ntitle: 未完成\nparent: up-parent\n---\n## 手順\n- [ ] まだ\n');
+  const x=await (await post2('/api/task/handup/preview',{project:'サンプルアプリ',task:'up-kid2'})).json();assert.ok(x.blockers.length);
+  assert.equal((await post2('/api/task/absorb',{project:'サンプルアプリ',task:'up-kid2',token:x.token,confirm:true})).status,409);
+});
+
 test('待っている指示はファイルに残り、再起動しても消えない', () => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-q-'));
   try {
@@ -740,6 +1124,116 @@ test('待っている指示はファイルに残り、再起動しても消え�
     const c = new chatLib.ChatRunner({ dirOf: id => (id === 'P' ? d : '') });
     assert.deepStrictEqual(c.queue('P', 'T').map(x => x.text), ['その次']);
   } finally { fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+test('main/derived task fields persist and direct workspace rejects concurrent AI', async()=>{
+ const p='サンプルアプリ',a=await (await post2('/api/task/new',{project:p,title:'Main work',kind:'main',workspaceMode:'direct'})).json();
+ const d=await (await post2('/api/task/new',{project:p,title:'Derived',kind:'derived',derivedFrom:a.id})).json();
+ assert.equal(d.kind,'derived');assert.equal(d.derivedFrom,a.id);
+ assert.equal((await post2('/api/task',{project:p,task:a.id,kind:'derived',derivedFrom:d.id})).status,409);
+ const old=sessions2.list;
+ try {sessions2.list=()=>[{project:p,task:d.id,running:true}];
+  assert.equal((await post2('/api/term/start',{project:p,task:a.id,ai:'codex'})).status,409);
+ } finally {sessions2.list=old;}
+ const started=await (await post2('/api/term/start',{project:p,task:a.id,ai:'codex'})).json();
+ assert.equal(started.dry,true);assert.ok(started.args.join(' ').includes('本作業'));
+});
+
+test('tree rename and branch project APIs keep IDs and source links', async()=>{
+ const p=await (await post2('/api/project/new',{name:'Tree original',phases:['A']})).json();
+ const child=await (await post2('/api/project/new',{name:'Tree child',parent:p.id})).json();
+ const branch=await (await post2('/api/project/new',{name:'Tree branch',parent:child.parent,derivedFrom:child.id})).json();
+ assert.equal(branch.parent,p.id);assert.equal(branch.derivedFrom,child.id);
+ const r=await (await post2('/api/hierarchy/rename',{project:p.id,name:'Tree renamed',expectedHash:p.completionHash})).json();
+ assert.equal(r.id,p.id);assert.equal(r.name,'Tree renamed');
+});
+
+test('completion routes require explicit confirmation, fresh content and idle AI', async () => {
+ const t=await (await post2('/api/task/new',{project:'サンプルアプリ',title:'Approval check'})).json();
+ const b={project:'サンプルアプリ',task:t.id,action:'approve',expectedHash:t.completionHash};
+ assert.equal((await post2('/api/task/completion',b)).status,400);
+ assert.equal((await post2('/api/task',{...b,state:'完了'})).status,409);
+ assert.equal((await post2('/api/task/completion',{...b,confirm:true,expectedHash:'stale'})).status,409);
+ const oldGet=sessions2.get, oldList=sessions2.list;
+ try {
+  sessions2.get=()=>({exited:false});sessions2.list=()=>[{project:b.project,running:true}];
+  assert.equal((await post2('/api/task/completion',{...b,confirm:true})).status,409);
+  const p=(await (await fetch(BASE2+'/api/state')).json()).projects.find(p=>p.id===b.project);
+  assert.equal((await post2('/api/project/status',{project:p.id,status:'完了',confirm:true,expectedHash:p.completionHash})).status,409);
+  assert.equal((await post2('/api/phase/next',{project:p.id,confirm:true,expectedHash:p.completionHash})).status,409);
+ } finally {sessions2.get=oldGet;sessions2.list=oldList;}
+ const approved=await (await post2('/api/task/completion',{...b,confirm:true})).json();
+ assert.equal(approved.state,'完了');
+ const reopened=await (await post2('/api/task/completion',{...b,action:'continue',confirm:true,expectedHash:approved.completionHash})).json();
+ assert.equal(reopened.state,'実行中');
+ assert.equal((await post2('/api/phase/continue',{project:b.project,expectedHash:'stale'})).status,409);
+ const p=(await (await fetch(BASE2+'/api/state')).json()).projects.find(p=>p.id===b.project);
+ assert.equal((await post2('/api/phase/continue',{project:p.id,expectedHash:p.completionHash})).status,200);
+ assert.equal((await post2('/api/phase/next',{project:p.id,confirm:true,expectedHash:'stale'})).status,409);
+ assert.equal((await post2('/api/project/status',{project:p.id,status:'完了',confirm:true,expectedHash:'stale'})).status,409);
+});
+
+test('maintenance endpoints enforce confirmation and busy guards, allow preview, move and restore selected fixture files',async()=>{
+ const p=await (await post2('/api/project/new',{name:'Maintenance fixture'})).json();
+ const dir=path.join(ROOT2,'Product',p.id,'.ai/work');fs.mkdirSync(dir,{recursive:true});const file=path.join(dir,'unused.dat');fs.writeFileSync(file,'maintenance fixture');const when=new Date(Date.now()-40*86400000);fs.utimesSync(file,when,when);
+ assert.equal((await fetch(BASE2+'/api/maintenance/preview',{method:'POST'})).status,403);
+ let d=await (await post2('/api/maintenance/preview',{project:p.id})).json();assert.equal(d.candidates.length,1);
+ const payload={project:p.id,token:d.token,selected:[d.candidates[0].id],confirm:true};
+ const old=sessions2.list;try {sessions2.list=()=>[{project:p.id,running:true}];
+  assert.equal((await post2('/api/maintenance/preview',{project:p.id})).status,200);
+  assert.equal((await post2('/api/maintenance/apply',payload)).status,409);
+  assert.equal((await post2('/api/maintenance/verify',{project:p.id})).status,409);
+ }finally{sessions2.list=old;}
+ assert.equal((await post2('/api/maintenance/apply',{...payload,confirm:false})).status,409);
+ const r=await (await post2('/api/maintenance/apply',payload)).json();assert.equal(r.moved,1);assert.equal(fs.existsSync(file),false);
+ const restored=await (await post2('/api/maintenance/restore',{project:p.id,transaction:r.id,confirm:true})).json();assert.equal(restored.restored,1);assert.equal(fs.readFileSync(file,'utf8'),'maintenance fixture');
+ assert.equal((await (await post2('/api/maintenance/verify',{project:p.id})).json()).ok,true);
+});
+
+test('separate body allows isolated peers and idempotent sessions, explicit direct excludes peers and locks started mode', async()=>{
+ const body=path.join(tmp2,'body-fixture');fs.mkdirSync(body);
+ const p=await (await post2('/api/project/new',{name:'Separate body',folders:{本体:body}})).json();
+ const pf=path.join(ROOT2,'Product',p.id,'PROJECT.md');
+ fs.writeFileSync(pf,fs.readFileSync(pf,'utf8').replace('folders:',`folders:\n  本体: ${body}`));
+ const a=await (await post2('/api/task/new',{project:p.id,title:'Isolated A'})).json();
+ const b=await (await post2('/api/task/new',{project:p.id,title:'Isolated B'})).json();
+ const d=await (await post2('/api/task/new',{project:p.id,title:'Direct',workspaceMode:'direct'})).json();
+ const oldList=sessions2.list,oldGet=sessions2.get;
+ try {
+  sessions2.list=()=>[{project:p.id,task:a.id,running:true}];
+  assert.equal((await post2('/api/term/start',{project:p.id,task:b.id,ai:'codex'})).status,200);
+  assert.equal((await post2('/api/term/start',{project:p.id,task:a.id,ai:'codex'})).status,200);
+  assert.equal((await post2('/api/term/start',{project:p.id,task:d.id,ai:'codex'})).status,409);
+  sessions2.list=()=>[{project:p.id,task:d.id,running:true}];
+  assert.equal((await post2('/api/term/start',{project:p.id,task:b.id,ai:'codex'})).status,409);
+  sessions2.get=()=>({exited:false,dir:body});
+  assert.equal((await post2('/api/term/start',{project:p.id,task:d.id,ai:'codex'})).status,200);
+ } finally {sessions2.list=oldList;sessions2.get=oldGet;}
+ const result=await (await post2('/api/term/start',{project:p.id,task:d.id,ai:'codex'})).json();
+ assert.equal(result.dir,body);
+ assert.ok(!result.args.join(' ').includes('参照（読むだけ）: '+path.dirname(pf)));
+ assert.equal((await post2('/api/task',{project:p.id,task:d.id,workspaceMode:'isolated'})).status,409);
+ const persisted=(await (await fetch(BASE2+'/api/state')).json()).projects.find(x=>x.id===p.id).tasks.find(t=>t.id===d.id);
+ assert.ok(persisted.workspaceStarted);
+});
+
+test('chat launch hook receives queued task context before any AI process is created',()=>{
+ const runner=new chatLib.ChatRunner({canStart:(ai,model,o)=>{assert.equal(o.project,'p');assert.equal(o.mode,'queued');return 'blocked fixture';}});
+ assert.throws(()=>runner.send({project:'p',task:'t',ai:'codex',mode:'queued'}),/blocked fixture/);
+ assert.equal(runner.running.size,0);
+});
+
+test('a running selected verification blocks new AI launch while state remains readable',async()=>{
+ const p=await (await post2('/api/project/new',{name:'Verify launch lock'})).json();const dir=path.join(ROOT2,'Product',p.id);
+ fs.writeFileSync(path.join(dir,'wait.cjs'),'setTimeout(()=>console.log("verified"),700)');fs.writeFileSync(path.join(dir,'package.json'),JSON.stringify({scripts:{test:'node wait.cjs'}}));
+ const t=await (await post2('/api/task/new',{project:p.id,title:'launch after verify'})).json();
+ const preview=await (await post2('/api/maintenance/preview',{project:p.id})).json();
+ const pending=post2('/api/maintenance/verify',{project:p.id,script:'test',expectedHash:preview.scripts[0].hash,confirm:true});
+ await new Promise(r=>setTimeout(r,100));
+ assert.equal((await post2('/api/term/start',{project:p.id,task:t.id,ai:'codex'})).status,409);
+ assert.equal((await fetch(BASE2+'/api/state')).status,200);
+ assert.equal((await (await pending).json()).ok,true);
+ assert.equal((await post2('/api/term/start',{project:p.id,task:t.id,ai:'codex'})).status,200);
 });
 
 test('第2版: 後片付け', () => {

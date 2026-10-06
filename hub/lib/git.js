@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { createHash } = require('node:crypto');
 const { execFileSync } = require('child_process');
 
 const MAX_FILES = 20000;          // これより多いフォルダは自動で保存を始めない
@@ -148,9 +149,9 @@ function copyLocalFiles(top, wt) {
 }
 
 // 取り込む前の見通し：変わったファイルの数・行数、本体とぶつかりそうか（本体は触らない）
-function preview({ dir, workRoot }) {
+function preview({ dir, workRoot, target }) {
   const wt = repoTop(dir);
-  const main = wt && mainOf(wt);
+  const main = target ? repoTop(target) : wt && mainOf(wt);
   if (!wt || !main) return null;
   const inside = path.relative(workRoot, wt);
   if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) return null;
@@ -167,40 +168,87 @@ function preview({ dir, workRoot }) {
     try { git(main, ['merge-tree', '--write-tree', '--name-only', '--no-messages', mainHead, tryGit(wt, ['rev-parse', 'HEAD'])]); }
     catch (e) { conflict = e.status === 1; }
   }
-  return { files, added: num(/(\d+) insertions?/), removed: num(/(\d+) deletions?/), conflict, mainDirty: dirty(main) };
+  return { files, added: num(/(\d+) insertions?/), removed: num(/(\d+) deletions?/), conflict, mainDirty: dirty(main), paths: (tryGit(wt, ['diff', '--name-only', '-z', base]) || '').split('\0').filter(Boolean) };
 }
 
 // ゴミ箱へ移す（完全には消さない）
 function toTrash(dir, trash) {
+  const dest = trashPath(dir, trash);
+  fs.renameSync(dir, dest);
+  return dest;
+}
+function trashPath(dir, trash) {
   const bin = trash || process.env.HUB_TRASH || path.join(os.homedir(), '.Trash');
   fs.mkdirSync(bin, { recursive: true });
   let dest = path.join(bin, path.basename(dir));
   if (fs.existsSync(dest)) dest += ' ' + new Date().toISOString().replace(/[:.]/g, '-');
-  fs.renameSync(dir, dest);
   return dest;
 }
 
 // 作業用コピーを本体に取り込み、片付ける。ぶつかったら何も変えずに conflict を返す
-function merge({ dir, workRoot, title }) {
+function merge({ dir, workRoot, title, target, cleanup = true }) {
   const wt = repoTop(dir);
   if (!wt) return { ok: false, error: '作業用コピーが見つかりません' };
   const inside = path.relative(workRoot, wt);
   if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) return { ok: false, error: 'Work フォルダの作業用コピーではありません' };
-  const main = mainOf(wt);
+  const origin = mainOf(wt);
+  const main = target ? repoTop(target) : origin;
   if (!main) return { ok: false, error: 'Git の作業用コピーではありません' };
+  if (!origin || main === wt || git(main, ['rev-parse', '--path-format=absolute', '--git-common-dir']) !== git(wt, ['rev-parse', '--path-format=absolute', '--git-common-dir'])) return { ok: false, error: '統合先は同じ本体の別の作業用コピーにしてください' };
   const branch = git(wt, ['rev-parse', '--abbrev-ref', 'HEAD']);
   save(wt, `${title}（作業の保存）`);
   save(main, '取り込み前の保存');
+  const before = git(main, ['rev-parse', 'HEAD']);
+  const already = isAncestor(main, git(wt, ['rev-parse', 'HEAD']));
   try {
-    git(main, ['merge', '--no-ff', '--no-edit', '-m', `取り込み: ${title}`, branch]);
+    if (!already) git(main, ['merge', '--no-ff', '--no-edit', '-m', `取り込み: ${title}`, branch]);
   } catch (e) {
     tryGit(main, ['merge', '--abort']);
     return { ok: false, conflict: true, error: '本体とぶつかったため、取り込みませんでした' };
   }
-  const trashed = toTrash(wt);
-  tryGit(main, ['worktree', 'prune']);
-  tryGit(main, ['branch', '-d', branch]);
-  return { ok: true, main, trashed };
+  const commit = git(main, ['rev-parse', 'HEAD']);
+  const files = (tryGit(main, ['diff', '--name-only', '-z', before, commit]) || '').split('\0').filter(Boolean);
+  const sourceSnapshot = inspect(wt);
+  const trashed = cleanup ? cleanupCopy({ dir: wt, workRoot, target: main, expectedSnapshot:sourceSnapshot }).trashed : null;
+  return { ok: true, main, trashed, commit, files, already, branch };
+}
+function isAncestor(dir, commit) { return /^[a-f0-9]{40,64}$/.test(commit || '') && tryGit(dir, ['merge-base', '--is-ancestor', commit, 'HEAD']) !== null; }
+function inspect(dir) {
+  const wt = repoTop(dir); if (!wt) return null;
+  // porcelainの同じ変更マークでも、中身・ステージ・未追跡ファイルが変われば拒否する。
+  const digest = createHash('sha256');
+  for (const args of [['diff','--binary','--no-ext-diff','--no-textconv','HEAD'], ['diff','--cached','--binary','--no-ext-diff','--no-textconv']]) {
+    const data = execFileSync('git', ['-C',wt,...args], {maxBuffer:256*1024*1024,stdio:['ignore','pipe','pipe']});
+    digest.update(String(data.length)+':').update(data);
+  }
+  const files = execFileSync('git',['-C',wt,'ls-files','--others','--exclude-standard','-z'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).split('\0').filter(Boolean).sort();
+  let bytes=0;if(files.length>MAX_FILES)throw Error('未追跡ファイルが多すぎて照合できません');
+  for (const f of files) {
+    const file=path.join(wt,f),st=fs.lstatSync(file);
+    if((bytes+=st.size)>256*1024*1024)throw Error('未追跡ファイルが大きすぎて照合できません');
+    const data=st.isSymbolicLink()?Buffer.from(fs.readlinkSync(file)):fs.readFileSync(file);
+    digest.update(JSON.stringify([f,st.mode,data.length])).update(data);
+  }
+  return { head: git(wt, ['rev-parse', 'HEAD']), branch: git(wt, ['rev-parse', '--abbrev-ref', 'HEAD']), status: git(wt, ['status', '--porcelain']), content: digest.digest('hex') };
+}
+function cleanupCopy({ dir, workRoot, target, expectedSnapshot, beforeMove = () => {} }) {
+  const wt = repoTop(dir), rel = wt && path.relative(workRoot, wt);
+  if (!wt || !rel || rel.startsWith('..') || path.isAbsolute(rel) || !mainOf(wt)) throw Error('片付ける作業用コピーの場所が不正です');
+  const branch = git(wt, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (!isAncestor(target, git(wt, ['rev-parse', 'HEAD'])) || tryGit(wt, ['diff', '--quiet', 'HEAD']) === null) throw Error('未統合の変更があるため作業用コピーを残します');
+  if (expectedSnapshot ? JSON.stringify(inspect(wt)) !== JSON.stringify(expectedSnapshot) : Boolean(git(wt,['ls-files','--others','--exclude-standard','-z']))) throw Error('片付け前に未統合のファイルが変わりました。作業用コピーを残します');
+  const sourceHead = git(wt, ['rev-parse', 'HEAD']), trashed = trashPath(wt);
+  beforeMove({trashed, branch, sourceHead});
+  fs.renameSync(wt, trashed);
+  finishCleanupCopy({target, branch, sourceHead});
+  return { trashed, branch };
+}
+function finishCleanupCopy({ target, branch, sourceHead }) {
+  if (!isAncestor(target, sourceHead)) throw Error('統合済みのコミットを確認できません');
+  git(target, ['worktree', 'prune']);
+  const head = tryGit(target, ['rev-parse', '--verify', 'refs/heads/' + branch]);
+  if (head && head !== sourceHead) throw Error('片付け途中でブランチが変わりました。登録は残します');
+  if (head) git(target, ['branch', '-D', branch]);
 }
 
 // Work/<プロジェクト>/ に残っている作業用コピーの数
@@ -208,4 +256,58 @@ function countCopies(workRoot) {
   try { return fs.readdirSync(workRoot, { withFileTypes: true }).filter(e => e.isDirectory() && !e.name.startsWith('.')).length; } catch (e) { return 0; }
 }
 
-module.exports = { available, repoTop, mainOf, save, init, prepare, merge, preview, toTrash, countCopies, dirty, copyLocalFiles };
+// GitHub などの場所：origin の URL をブラウザで開ける https の形に直す（直せない物は空）
+function webUrl(raw) {
+  let s = String(raw || '').trim();
+  let m;
+  if ((m = s.match(/^[\w.-]+@([^:/]+):(.+)$/))) s = `https://${m[1]}/${m[2]}`; // git@github.com:o/r.git
+  else if ((m = s.match(/^(?:ssh|git|git\+ssh):\/\/(?:[^@/]+@)?([^:/]+)(?::\d+)?\/(.+)$/))) s = `https://${m[1]}/${m[2]}`;
+  if (!/^https?:\/\//.test(s)) return '';
+  try { const u = new URL(s); u.username = ''; u.password = ''; s = u.origin + u.pathname; } catch (e) { return ''; } // 合言葉入りの URL は外す
+  return s.replace(/\/+$/, '').replace(/\.git$/, '');
+}
+// { url, branch } か null。一覧は15秒ごとに来るので、場所ごとに120秒覚えておく（fresh で読み直す）
+const REMOTE_TTL = 120000;
+const remoteInfoCache = new Map(); // dir → { at, value }
+function remoteInfo(dir, { fresh } = {}) {
+  const hit = remoteInfoCache.get(dir);
+  if (!fresh && hit && Date.now() - hit.at < REMOTE_TTL) return hit.value;
+  let value = null, hasOrigin = false;
+  if (dir && fs.existsSync(dir)) {
+    const raw = tryGit(dir, ['config', '--get', 'remote.origin.url']);
+    hasOrigin = raw !== null;
+    const url = webUrl(raw);
+    if (url) {
+      const b = tryGit(dir, ['rev-parse', '--abbrev-ref', 'HEAD']) || '';
+      value = { url, branch: b === 'HEAD' ? '' : b };
+    }
+  }
+  remoteInfoCache.set(dir, { at: Date.now(), value, hasOrigin });
+  return value;
+}
+
+function hasOrigin(dir) { remoteInfo(dir); return Boolean(remoteInfoCache.get(dir)?.hasOrigin); }
+
+function integrationReceipt(dir, record, task) {
+  // 旧版の成功ログにはこの3項目が無い。名前と時刻が一意に合う本体履歴だけで補う。
+  if (record?.ok === true && !['main', 'commit', 'files'].some(k => Object.hasOwn(record, k))) {
+    const at = Date.parse(record.at);
+    if (!Number.isFinite(at) || !task?.id || typeof task.title !== 'string' || !task.title || record.task !== task.id) return null;
+    const subject = `取り込み: ${task.id} ${task.title}`;
+    const log = tryGit(dir, ['log', '--merges', '--format=%H%x09%cI%x09%P%x09%s', 'HEAD']);
+    if (log === null) return null;
+    const matches = log.split('\n').map(line => line.split('\t')).filter(row =>
+      row.length === 4 && row[3] === subject && row[2].split(' ').length === 2 &&
+      Math.abs(Date.parse(row[1]) - at) <= 10000);
+    if (matches.length !== 1) return null;
+    const commit = matches[0][0];
+    if (tryGit(dir, ['merge-base', '--is-ancestor', commit, 'HEAD']) === null) return null;
+    const files = tryGit(dir, ['diff', '--name-only', '-z', `${commit}^1`, commit]);
+    if (files === null) return null;
+    return {dir, commit, files:files.split('\0').filter(Boolean), github:remoteInfo(dir), recovered:true};
+  }
+  if (!record?.commit || !record.main || !Array.isArray(record.files) || path.resolve(dir) !== path.resolve(record.main)) return null;
+  if (tryGit(dir, ['merge-base', '--is-ancestor', record.commit, 'HEAD']) === null) return null;
+  return {dir, commit:record.commit, files:record.files, github:remoteInfo(dir)};
+}
+module.exports = { hasOrigin, tooBig, integrationReceipt, available, repoTop, mainOf, save, init, prepare, merge, preview, toTrash, cleanupCopy, finishCleanupCopy, inspect, isAncestor, countCopies, dirty, copyLocalFiles, remoteInfo, remoteInfoCache, webUrl };

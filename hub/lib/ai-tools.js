@@ -5,7 +5,8 @@ const os = require('os');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
 
-const AIS = ['claude', 'codex'];
+const { AIS, AI_LABEL, AGY_MODEL, childEnv, agyAccountError } = require('./launch');
+const { latestVersion, newer } = require('./update-check');
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$/;
 const MAX_OUTPUT = 5 * 1024 * 1024;
 
@@ -19,7 +20,7 @@ function toolError(status, stage, reason) {
 
 function runFile(file, args, opts = {}) {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { timeout: opts.timeout || 30000, maxBuffer: MAX_OUTPUT, env: process.env }, (err, stdout, stderr) => {
+    execFile(file, args, { timeout: opts.timeout || 30000, maxBuffer: MAX_OUTPUT, env: childEnv(path.basename(file) === 'agy' ? 'agy' : '', process.env) }, (err, stdout, stderr) => {
       if (err) return reject(err); // stdout/stderr には認証情報が入り得るので外へ出さない
       resolve(String(stdout || ''));
     });
@@ -31,19 +32,26 @@ function failure(stage, err) {
   return toolError(502, stage, `${stage === 'update' ? '更新' : 'モデル再取得'}に失敗しました（${detail}）`);
 }
 
+// PATH の中から探す。結果は30秒だけ覚える（一覧のたびに PATH を全部確かめないため。入れ直した時は30秒で反映）
+const foundAt = new Map();
 function executable(name) {
+  const hit = foundAt.get(name);
+  if (hit && Date.now() - hit.at < 30000) return hit.file;
+  let file = '';
   for (const dir of String(process.env.PATH || '').split(path.delimiter)) {
     if (!dir) continue;
-    const file = path.join(dir, name);
-    try { fs.accessSync(file, fs.constants.X_OK); return file; } catch (e) { /* 次へ */ }
+    const f = path.join(dir, name);
+    try { fs.accessSync(f, fs.constants.X_OK); file = f; break; } catch (e) { /* 次へ */ }
   }
-  return '';
+  foundAt.set(name, { file, at: Date.now() });
+  return file;
 }
 
 function methodFor(ai, file) {
   if (!file) return 'missing';
   let real;
   try { real = fs.realpathSync(file); } catch (e) { return 'unknown'; }
+  if (ai === 'agy') return path.basename(real) === 'agy' ? 'native' : 'unknown';
   if (ai === 'codex') return /[/\\]\.codex[/\\]packages[/\\]standalone[/\\]/.test(real) ? 'standalone' : 'unknown';
   if (/[/\\]Caskroom[/\\]claude-code@latest[/\\]/.test(real)) return 'homebrew-cask';
   if (/[/\\]\.claude[/\\]local[/\\]|[/\\]\.local[/\\]share[/\\]claude[/\\]/.test(real)) return 'native';
@@ -83,6 +91,12 @@ function codexModels(json) {
   const models = cleanModels(rows.filter(row => row && row.visibility === 'list').map(row => ({ id: row.slug, label: row.display_name || row.slug })));
   if (!models.length) throw toolError(502, 'models', 'Codex の表示対象モデルが見つかりませんでした');
   return models;
+}
+
+function agyModels(text) {
+  const found = String(text).split(/\r?\n/).map(line => line.split('\t')).find(([id]) => id === AGY_MODEL.id);
+  if (!found) { const error = toolError(502, 'models', 'Agy の一覧に承認された Gemini 3.1 Pro (High) がありません。別のモデルへは切り替えません'); error.unavailable = true; throw error; }
+  return [{ ...AGY_MODEL }];
 }
 
 function claudeModels(json) {
@@ -160,12 +174,16 @@ class AiTools {
     this.dry = Boolean(opts.dry);
     this.refreshClaude = opts.refreshClaude || claudeInitialize;
     this.operation = null;
-    this.catalogs = { claude: { models: [], known: [], refreshedAt: '', source: '' }, codex: { models: [], known: [], refreshedAt: '', source: '' } };
+    this.latest = opts.latest || latestVersion;
+    this.updateChecks = {};
+    this.checking = new Map();
+    this.updateEpoch = {};
+    this.catalogs = Object.fromEntries(AIS.map(ai => [ai, { models: [], known: [], refreshedAt: '', source: '' }]));
     try {
       const saved = JSON.parse(fs.readFileSync(this.file, 'utf8'));
       for (const ai of AIS) if (saved[ai]) {
-        const models = cleanModels(saved[ai].models);
-        this.catalogs[ai] = { models, known: mergeKnown(cleanModels(saved[ai].known || []), models),
+        const models = cleanModels(saved[ai].models).filter(x => ai !== 'agy' || x.id === AGY_MODEL.id);
+        this.catalogs[ai] = { models, known: mergeKnown(cleanModels(saved[ai].known || []).filter(x => ai !== 'agy' || x.id === AGY_MODEL.id), models),
           refreshedAt: String(saved[ai].refreshedAt || ''), source: String(saved[ai].source || 'saved') };
       }
     } catch (e) { /* 保存が無ければ CLI のローカルキャッシュを読む */ }
@@ -219,11 +237,39 @@ class AiTools {
       return [ai, {
         installed: Boolean(file), version: await this.version(ai, file), method,
         updating: Boolean(this.operation && this.operation.ai === ai),
+        checking: this.checking.has(ai), updateCheck: this.updateChecks[ai] || null,
         models: this.catalogs[ai].models, refreshedAt: this.catalogs[ai].refreshedAt, source: this.catalogs[ai].source,
         modelRefreshAvailable: true,
       }];
     }));
-    return { tools: Object.fromEntries(entries), operation: this.operation };
+    return { tools: Object.fromEntries(entries), operation: this.operation, busyCount: this.busy() };
+  }
+
+  async checkUpdate(ai) {
+    if (!AIS.includes(ai)) throw toolError(400, 'input', 'AI の指定が正しくありません');
+    if (this.operation?.ai === ai && this.operation.kind === 'update') throw toolError(409, 'busy', 'このAIの更新適用が終わってから確認してください');
+    if (this.checking.has(ai)) return this.checking.get(ai);
+    const file = this.find(ai);
+    if (!file) throw toolError(400, 'detect', `${AI_LABEL[ai]} が見つかりません`);
+    const pending = (async () => {
+      const epoch = this.updateEpoch[ai] || 0;
+      try {
+        const currentVersion = await this.version(ai, file);
+        if (!currentVersion && !this.dry) throw Error('現在版が不明');
+        const method = this.methods[ai] || methodFor(ai, file);
+        const latest = this.dry ? { version: currentVersion || '0.0.0', source: 'dry-run' } : await this.latest(ai, method, this.home);
+        if (epoch !== (this.updateEpoch[ai] || 0) || this.operation?.ai === ai && this.operation.kind === 'update') throw toolError(409, 'busy', '確認中に更新が適用されました。適用後に確認してください');
+        const result = { ok: true, ai, currentVersion, latestVersion: latest.version, source: latest.source,
+          available: newer(latest.version, currentVersion), checkedAt: new Date().toISOString(), applicable: ['standalone', 'native', 'homebrew-cask'].includes(method) };
+        this.updateChecks[ai] = result; return result;
+      } catch (e) {
+        if (e.status === 409) throw e;
+        this.updateChecks[ai] = { ...this.updateChecks[ai], ok: false, available: null, error: '更新情報を確認できませんでした。配布元への接続とCLIの版を確認してください', failedAt: new Date().toISOString() };
+        throw toolError(502, 'check', this.updateChecks[ai].error);
+      }
+    })();
+    this.checking.set(ai, pending);
+    try { return await pending; } finally { this.checking.delete(ai); }
   }
 
   check(ai) {
@@ -232,14 +278,15 @@ class AiTools {
     const n = this.busy();
     if (n) throw toolError(409, 'busy', `動いている AI が ${n} つあります。止めてから更新してください`);
     const file = this.find(ai);
-    if (!file) throw toolError(400, 'detect', `${ai === 'codex' ? 'Codex' : 'Claude Code'} が見つかりません`);
+    if (!file) throw toolError(400, 'detect', `${AI_LABEL[ai]} が見つかりません`);
+    if (ai === 'agy') { const error = agyAccountError(this.home); if (error) throw toolError(409, 'auth', error); }
     return { file, method: this.methods[ai] || methodFor(ai, file) };
   }
 
   saveCatalog(ai, found) {
     const previous = new Set(this.catalogs[ai].models.map(x => x.id));
     const clean = uniqueLabels(this.catalogs[ai].known, cleanModels(found.models));
-    if (!clean.length) throw toolError(502, 'models', '取得したモデル一覧が空のため、以前の候補を残しました');
+    if (!clean.length && !(ai === 'agy' && found.unavailable)) throw toolError(502, 'models', '取得したモデル一覧が空のため、以前の候補を残しました');
     const known = mergeKnown(this.catalogs[ai].known, clean);
     const refreshedAt = new Date().toISOString();
     const next = { ...this.catalogs, [ai]: { models: clean, known, refreshedAt, source: found.source } };
@@ -253,10 +300,16 @@ class AiTools {
       throw e;
     }
     this.catalogs = next;
-    return { ok: true, models: clean, added: clean.filter(x => !previous.has(x.id)).length, refreshedAt, source: found.source };
+    return { ok: true, models: clean, added: clean.filter(x => !previous.has(x.id)).length, refreshedAt, source: found.source,
+      ...(found.unavailable ? { unavailable: true, warning: '承認された Gemini 3.1 Pro (High) が一覧から外れたため、Agy を選べない状態にしました。別のモデルへは切り替えません' } : {}) };
   }
 
   async fetchModels(ai, file) {
+    if (ai === 'agy') {
+      const text = await this.run(file, ['models']);
+      try { return { models: agyModels(text), source: 'agy-cli' }; }
+      catch (e) { if (!e.unavailable) throw e; return { models: [], source: 'agy-cli', unavailable: true }; }
+    }
     if (ai === 'codex') return { models: codexModels(await this.run(file, ['debug', 'models'], { timeout: 120000 })), source: 'codex-cli' };
     const before = latestClaudeCache(this.home);
     const liveIds = await this.refreshClaude(file); // 応答の main/overflow は混在するので、モデル名は cache の main から取る
@@ -302,13 +355,16 @@ class AiTools {
     if (ai === 'codex' && method === 'standalone') { updater = file; args = ['update']; }
     else if (ai === 'claude' && method === 'homebrew-cask') { updater = this.find('brew'); args = ['upgrade', '--cask', 'claude-code@latest']; }
     else if (ai === 'claude' && method === 'native') { updater = file; args = ['update']; }
+    else if (ai === 'agy' && method === 'native') { updater = file; args = ['update']; }
     else throw toolError(400, 'detect', 'この導入方法の更新手順を確認できませんでした');
     if (!updater) throw toolError(400, 'detect', 'Homebrew が見つかりません');
     if (this.dry) return { ok: true, dry: true, ai, beforeVersion: '', afterVersion: '', changed: false, models: { ok: true, models: this.catalogs[ai].models, added: 0 } };
     this.operation = { ai, kind: 'update', startedAt: new Date().toISOString() };
+    this.updateEpoch[ai] = (this.updateEpoch[ai] || 0) + 1;
     try {
       const beforeVersion = await this.version(ai, file);
       await this.run(updater, args, { timeout: 600000 });
+      delete this.updateChecks[ai];
       let afterVersion = '', verifyError = '';
       try { afterVersion = await this.version(ai, this.find(ai) || file, true); }
       catch (e) { verifyError = e.reason || e.message; }
@@ -330,4 +386,4 @@ class AiTools {
   isOperating() { return Boolean(this.operation); }
 }
 
-module.exports = { AiTools, codexModels, claudeModels, claudeInitialize, methodFor, toolError };
+module.exports = { AiTools, agyModels, codexModels, claudeModels, claudeInitialize, methodFor, toolError, executable };

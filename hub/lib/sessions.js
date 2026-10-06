@@ -4,6 +4,7 @@
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
+const { childEnv, agyAccountError } = require('./launch');
 
 let pty = null;
 try { pty = require('node-pty'); } catch (e) { pty = null; }
@@ -40,6 +41,7 @@ const MAX_SCROLLBACK = 200000; // 画面を開き直した時に見せる分（�
 class Sessions {
   constructor() {
     this.map = new Map(); // key: project/task/ai → { proc, buf, watchers, ai, dir, started, exited }
+    this.onExit = null; // 終わった時に呼ぶ（project, task, ai, s）。未読の印に使う
   }
 
   available() { return Boolean(pty); }
@@ -64,7 +66,8 @@ class Sessions {
     const k = this.key(project, task, ai);
     const cur = this.map.get(k);
     if (cur && !cur.exited) return cur;
-    const fullEnv = { ...process.env, ...env, TERM: 'xterm-256color', LANG: process.env.LANG || 'ja_JP.UTF-8', HOME: os.homedir() };
+    if (ai === 'agy') { const error = agyAccountError(); if (error) throw new Error(error); }
+    const fullEnv = childEnv(ai, { ...process.env, ...env, TERM: 'xterm-256color', LANG: process.env.LANG || 'ja_JP.UTF-8', HOME: os.homedir() });
     if (!dir || !fs.existsSync(dir)) throw new Error(`作業の場所が見つかりません: ${dir}`);
     const exe = which(command, fullEnv.PATH);
     if (!exe) throw new Error(`「${command}」が見つかりません。ターミナルで ${command} が動くか確かめてください`);
@@ -85,6 +88,7 @@ class Sessions {
     proc.onExit(({ exitCode }) => {
       s.exited = true; s.code = exitCode;
       for (const w of s.watchers) w({ type: 'exit', code: exitCode });
+      if (this.onExit) { try { this.onExit(project, task, ai, s); } catch (e) { /* 無視 */ } }
     });
     this.map.set(k, s);
     return s;
@@ -119,6 +123,7 @@ class Sessions {
   stop(project, task, ai) {
     const s = this.get(project, task, ai);
     if (!s) return false;
+    s.stopped = true; // 人が止めた（未読にしない）
     if (!s.exited) { try { s.proc.kill(); } catch (e) { /* 無視 */ } }
     this.map.delete(this.key(project, task, ai));
     return true;

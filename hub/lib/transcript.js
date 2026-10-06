@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const LIMIT = 200000;       // これを超えたら古い方を省く（省いたことは資料に書く）
+const LIMIT = 60000;        // 引き継ぎの文字数。トークン数ではない。省略を資料に書く。
 const MAX_FILES = 400;      // 探すファイルの上限
 
 function home() { return process.env.HUB_AI_HOME || os.homedir(); }
@@ -104,7 +104,7 @@ function fromTerminal(buf) {
 function collect({ ai, dir, since, buf }) {
   const from = since ? since - 60000 : 0;
   let r = null;
-  try { r = ai === 'codex' ? fromCodex(dir, from) : fromClaude(dir, from); } catch (e) { r = null; }
+  try { r = ai === 'codex' ? fromCodex(dir, from) : ai === 'claude' ? fromClaude(dir, from) : null; } catch (e) { r = null; }
   if (r) return { kind: 'log', source: r.source, msgs: r.msgs };
   return { kind: 'screen', text: fromTerminal(buf || '') };
 }

@@ -3,7 +3,9 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { createHash } = require('crypto');
 const { parseDoc, parseYaml, setScalar, scalar } = require('./frontmatter');
+const { Completion, hash } = require('./completion');
 
 const SAFE_NAME = /^[^/\\\0]+$/;
 
@@ -14,6 +16,58 @@ function expandHome(p) {
 
 function read(file) {
   try { return fs.readFileSync(file, 'utf8'); } catch { return null; }
+}
+
+// 読んで分けた結果の使い回し：ファイルの更新時刻と大きさが前と同じなら、読み直さずに前の結果を使う
+// （一覧は15秒ごとに全ファイルを読んでいた。台帳が多い時や書類フォルダ（iCloud）が遅い時に重かったため）
+const parsedFiles = new Map();
+function cachedParse(file, build) {
+  let st;
+  try { st = fs.statSync(file); } catch { parsedFiles.delete(file); return null; }
+  const key = `${st.mtimeMs}:${st.size}`;
+  const hit = parsedFiles.get(file);
+  if (hit && hit.key === key) return hit.value;
+  const text = read(file);
+  if (text === null) { parsedFiles.delete(file); return null; }
+  const value = build(text);
+  if (parsedFiles.size > 5000) parsedFiles.clear();
+  parsedFiles.set(file, { key, value });
+  return value;
+}
+
+// 意味の要約は書き手が作る。原文と完全に一致する、検査済みの要約だけを使う。
+const ISSUE_STATES = new Set(['未解決', '確認待ち', '判断待ち', '解決済み', '履歴']);
+function issueSummaries(file) {
+  return cachedParse(file, text => {
+    let doc;
+    try { doc = JSON.parse(text); } catch { return new Map(); }
+    const items = Array.isArray(doc?.items) ? doc.items : [];
+    const summaries = new Map(), seen = new Set();
+    for (const item of items) {
+      if (!item || typeof item.hash !== 'string' || !/^[a-f0-9]{16}$/.test(item.hash)) continue;
+      // 同じ原文への重複指定は、どちらが最新か推測せず使わない。
+      if (seen.has(item.hash)) { summaries.delete(item.hash); continue; }
+      seen.add(item.hash);
+      if (typeof item.title !== 'string' || !item.title.trim() || Array.from(item.title).length > 30
+        || /[\r\n]/.test(item.title) || !ISSUE_STATES.has(item.state)
+        || typeof item.next !== 'string' || Array.from(item.next).length > 50 || /[\r\n]/.test(item.next)
+        || !['', '人', 'AI'].includes(item.who)) continue;
+      summaries.set(item.hash, { title: item.title, state: item.state, next: item.next, who: item.who });
+    }
+    return summaries;
+  }) || new Map();
+}
+
+function withIssueSummaries(issues, file) {
+  const summaries = issueSummaries(file);
+  return (Array.isArray(issues) ? issues : []).filter(i => typeof i === 'string' ? !!i : i && typeof i.text === 'string' && !!i.text).map(i => {
+    const text = typeof i === 'string' ? i : i.text;
+    const summary = summaries.get(createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16));
+    if (typeof i === 'string') return summary ? { text, summary: { ...summary } } : i;
+    // キャッシュと PROJECT.md 側の形式を変更せず、summary は別ファイルからだけ採用する。
+    const { summary: ignored, ...original } = i;
+    return summary ? { ...original, summary: { ...summary } } : original;
+  });
 }
 
 // 本文の「## 見出し」ごとに分ける
@@ -80,6 +134,19 @@ class Store {
   constructor(root) {
     this.root = root;
     this.product = path.join(root, 'Product');
+    this.completion = new Completion(root, c => {
+      let ids = []; try { ids = fs.readdirSync(this.product); } catch (e) { /* 初回 */ }
+      for (const id of ids) {
+        const dir = this.projectDir(id); if (!dir) continue;
+        const data = parseDoc(read(path.join(dir, 'PROJECT.md')) || '').data;
+        c.data.projects[id] = { ...(data.status === '完了' ? { status: 'migrated' } : {}), phases: Object.fromEntries((Array.isArray(data.phases) ? data.phases : []).filter(ph => ph && ph.state === '完了').map(ph => [ph.name, 'migrated'])) };
+        let files = []; try { files = fs.readdirSync(path.join(dir, '.ai/tasks')); } catch (e) { /* 作業なし */ }
+        for (const name of files.filter(n => n.endsWith('.md') && !/^[_.]/.test(n))) {
+          const text = read(path.join(dir, '.ai/tasks', name));
+          if (parseDoc(text || '').data.state === '完了') c.data.tasks[`${id}/${name.slice(0, -3)}`] = { hash: hash(text), at: 'migrated' };
+        }
+      }
+    });
   }
 
   projectDir(id) {
@@ -96,23 +163,33 @@ class Store {
   }
 
   readTask(file) {
-    const { data, body } = parseDoc(read(file) || '');
-    const secs = sections(body);
+    const c = cachedParse(file, text => {
+      const { data, body } = parseDoc(text);
+      const steps = readSteps(body);
+      return { text, data, secs: sections(body), steps, fingerprint: hash(text), stepsHash: hash(JSON.stringify(steps)) };
+    }) || { text: '', data: {}, secs: {}, steps: [], fingerprint: hash(''), stepsHash: hash('[]') };
+    const { data, secs, text } = c;
+    const steps = c.steps.map(x => ({ ...x }));
     const id = path.basename(file, '.md');
     return {
       id,
       title: data.title || id,
       role: data.role || '',
       owner: data.owner || '',
-      state: data.state || '未着手',
+      ...this.completion.task(`${path.basename(path.dirname(path.dirname(path.dirname(file))))}/${id}`, data.state, text, steps, c),
       question: data.question || '',
       workdir: data.workdir || '',
+      mergeExcluded: data.mergeExcluded === true,
       model: data.model || '',
       parent: data.parent || '',
+      kind: data.kind === 'derived' ? 'derived' : 'main',
+      derivedFrom: data.derivedFrom || '',
+      workspaceMode: data.workspaceMode === 'direct' ? 'direct' : 'isolated',
+      workspaceStarted: data.workspaceStarted || '',
       effort: data.effort || '',
       phase: data.phase || '',
       via: data.via || '',
-      steps: readSteps(body),
+      steps,
       skills: Array.isArray(data.skills) ? data.skills.filter(Boolean) : [],
       updated: data.updated || '',
       done: pick(secs, 'やったこと'),
@@ -125,7 +202,9 @@ class Store {
   readProject(id) {
     const dir = this.projectDir(id);
     if (!dir) return null;
-    const { data, body } = parseDoc(read(path.join(dir, 'PROJECT.md')) || '');
+    const c = cachedParse(path.join(dir, 'PROJECT.md'), text => { const { data, body } = parseDoc(text); return { data, notes: projectNotes(body), textHash: hash(text) }; })
+      || { data: {}, notes: '', textHash: hash('') };
+    const { data } = c;
     const tdir = path.join(dir, '.ai', 'tasks');
     let tasks = [];
     try {
@@ -139,24 +218,32 @@ class Store {
       id,
       dir,
       name: data.name || id,
-      status: data.status || '未着手',
+      ...this.completion.project(id, data),
+      completionHash: c.textHash,
+      phaseContinueKey: this.completion.data.projects[id]?.continued || '',
+      phaseOfferKey: hash(JSON.stringify(tasks.map(t => [t.id,t.state,t.phase,t.steps]))),
       parent: data.parent || '',
+      derivedFrom: data.derivedFrom || '',
       description: data.description || '',
-      notes: projectNotes(body),
+      notes: c.notes,
       updated: data.updated || '',
-      phases: Array.isArray(data.phases) ? data.phases : [],
       folders: Object.entries(folders).filter(([, v]) => v).map(([label, p]) => ({ label, path: p })),
       related: Array.isArray(data.related) ? data.related.filter(Boolean) : [],
-      issues: Array.isArray(data.issues) ? data.issues.filter(i => i && (i.text || typeof i === 'string')) : [],
+      issues: withIssueSummaries(data.issues, path.join(dir, '.ai', 'issues-summary.json')),
       chats: Array.isArray(data.chats) ? data.chats.filter(Boolean) : [],
       tasks,
     };
   }
 
   // 新しいプロジェクト：ひな形（CLAUDE.md・AGENTS.md・.ai/ など）を写し、台帳を書く
-  createProject({ name, description, body, phases, parent, related, refs }, templateDir) {
+  createProject({ name, description, body, phases, parent, derivedFrom, related, refs }, templateDir) {
     const nm = oneLine(name).replace(/[\/\\\0]/g, '・').slice(0, 60);
     if (!nm || nm === '.' || nm === '..' || nm.startsWith('.') || nm.startsWith('_')) return { error: 'プロジェクト名を入れてください' };
+    const projects = this.listProjects();
+    const { Hierarchy } = require('./hierarchy');
+    const h = new Hierarchy(this);
+    try { parent = h.resolve(parent, projects); derivedFrom = h.resolve(derivedFrom, projects); } catch(e) { return { error: e.message }; }
+    if (projects.some(p => p.name === nm)) return { error: '同じ名前のプロジェクトがあります' };
     const dir = path.join(this.product, nm);
     if (fs.existsSync(dir)) return { error: `「${nm}」はもうあります` };
     fs.mkdirSync(dir, { recursive: true });
@@ -174,6 +261,7 @@ class Store {
       `updated: ${now().slice(0, 10)}`,
       `description: ${q(description)}`,
       `parent: ${q(parent)}`,
+      `derivedFrom: ${q(derivedFrom)}`,
       'phases:',
       ...(list.length ? list : ['計画', '作る', 'チェック', '仕上げ']).map((ph, i) => `  - { name: ${ph.replace(/[,{}]/g, '・')}, state: ${i === 0 ? '進行中' : '未着手'} }`),
       'folders:',
@@ -233,10 +321,11 @@ class Store {
   }
 
   // 状態・質問を書き換え、メモを1行足す
-  updateTask(projectId, taskId, { state, question, memo, owner, role, model, effort, parent, workdir, phase, via }) {
+  updateTask(projectId, taskId, { state, question, memo, owner, role, model, effort, parent, workdir, phase, via, mergeExcluded, kind, derivedFrom, workspaceMode, workspaceStarted }) {
     const file = this.taskFile(projectId, taskId);
     if (!file) return null;
     let text = read(file);
+    const key = `${projectId}/${taskId}`, preserve = this.completion.data.tasks[key]?.hash === hash(text);
     if (state !== undefined) text = setScalar(text, 'state', state);
     if (question !== undefined) text = setScalar(text, 'question', question);
     if (owner !== undefined) text = setScalar(text, 'owner', owner);
@@ -245,8 +334,10 @@ class Store {
     if (effort !== undefined) text = setScalar(text, 'effort', effort);
     if (parent !== undefined) text = setScalar(text, 'parent', parent);
     if (workdir !== undefined) text = setScalar(text, 'workdir', workdir);
+    if (typeof mergeExcluded === 'boolean') text = setScalar(text, 'mergeExcluded', mergeExcluded);
     if (phase !== undefined) text = setScalar(text, 'phase', phase);
     if (via !== undefined) text = setScalar(text, 'via', via);
+    for (const [key,value] of Object.entries({kind,derivedFrom,workspaceMode,workspaceStarted})) if (value !== undefined) text = setScalar(text,key,value);
     text = setScalar(text, 'updated', now());
     if (memo && String(memo).trim()) {
       const line = `- ${now()} ${String(memo).replace(/[\r\n]+/g, ' ').trim()}`;
@@ -255,14 +346,16 @@ class Store {
         : text.replace(/\s*$/, `\n\n## メモ\n${line}\n`);
     }
     fs.writeFileSync(file, text);
+    if (preserve && parseDoc(text).data.state === '完了') this.completion.approveTask(key, text);
     return this.readTask(file);
   }
 
-  // 手順に印を付ける・外す。全部付いたら完了、外したら実行中に戻す
+  // 手順だけを更新。全部付いても、人の承認までは一覧に残す。
   setStep(projectId, taskId, index, done) {
     const file = this.taskFile(projectId, taskId);
     if (!file) return null;
-    const lines = read(file).split('\n');
+    const before = read(file), key = `${projectId}/${taskId}`, preserve = this.completion.data.tasks[key]?.hash === hash(before);
+    const lines = before.split('\n');
     let inside = false, n = -1, hit = false;
     for (let i = 0; i < lines.length; i++) {
       if (/^##\s/.test(lines[i])) { inside = /^##\s+手順/.test(lines[i]); continue; }
@@ -272,9 +365,9 @@ class Store {
     let text = setScalar(lines.join('\n'), 'updated', now());
     const steps = readSteps(parseDoc(text).body);
     const cur = parseDoc(text).data.state;
-    if (steps.length && steps.every(x => x.done)) text = setScalar(text, 'state', '完了');
-    else if (cur === '完了') text = setScalar(text, 'state', '実行中');
+    if (!steps.every(x => x.done) && cur === '完了') text = setScalar(text, 'state', '実行中');
     fs.writeFileSync(file, text);
+    if (preserve && parseDoc(text).data.state === '完了') this.completion.approveTask(key,text);
     return this.readTask(file);
   }
 
@@ -301,12 +394,29 @@ class Store {
     return this.readTask(file);
   }
 
+  // 「## 見出し」の終わりに文を足す（見出しが無ければ終わりに作る）。ChatGPT の報告・提案で使う
+  appendSection(projectId, taskId, heading, block) {
+    const file = this.taskFile(projectId, taskId), add = String(block || '').replace(/\s+$/, '');
+    if (!file || !add) return null;
+    const lines = read(file).replace(/\s*$/, '\n').split('\n');
+    const h = lines.findIndex(l => l.replace(/^##\s+/, '').trim() === heading && /^##\s/.test(l));
+    if (h < 0) lines.splice(lines.length - 1, 0, '', `## ${heading}`, add);
+    else {
+      let end = h + 1;
+      for (let i = h + 1; i < lines.length && !/^##\s/.test(lines[i]); i++) if (lines[i].trim()) end = i + 1;
+      lines.splice(end, 0, add);
+    }
+    fs.writeFileSync(file, setScalar(lines.join('\n'), 'updated', now()));
+    return this.readTask(file);
+  }
+
   // プロジェクトの状態（人が［プロジェクトを完了にする］を押した時など）
   setProjectStatus(projectId, status) {
     const p = this.readProject(projectId);
     if (!p) return null;
     const file = path.join(p.dir, 'PROJECT.md');
     fs.writeFileSync(file, setScalar(read(file), 'status', status));
+    if (status === '完了') this.completion.approveProject(projectId, parseDoc(read(file)).data, { status: true });
     return this.readProject(projectId);
   }
 
@@ -318,25 +428,52 @@ class Store {
     if (i < 0) return p;
     const file = path.join(p.dir, 'PROJECT.md');
     let text = setPhaseLine(read(file), p.phases[i].name, '完了');
-    if (p.phases[i + 1]) text = setPhaseLine(text, p.phases[i + 1].name, '進行中');
-    else text = setScalar(text, 'status', '完了');
+    if (p.phases[i + 1] && !p.phases[i + 1].completionPending) text = setPhaseLine(text, p.phases[i + 1].name, '進行中');
+    else if (!p.phases[i + 1]) text = setScalar(text, 'status', '完了');
     fs.writeFileSync(file, text);
+    this.completion.approveProject(projectId, parseDoc(text).data, { phase: p.phases[i].name, status: !p.phases[i + 1] });
     return this.readProject(projectId);
   }
 
+  phaseOfferKey(p) { return hash(JSON.stringify(p.tasks.map(t => [t.id,t.state,t.phase,t.steps]))); }
+
+  continuePhase(projectId) {
+    const p = this.readProject(projectId); if (!p) return null;
+    const ph = p.phases.find(x => x.state !== '完了'); if (!ph) return p;
+    const file = path.join(p.dir, 'PROJECT.md');
+    fs.writeFileSync(file, setPhaseLine(read(file), ph.name, '進行中'));
+    this.completion.data.projects[projectId] ||= { phases: {} };
+    this.completion.data.projects[projectId].continued = this.phaseOfferKey(p); this.completion.save();
+    return this.readProject(projectId);
+  }
+
+  decideTask(projectId, taskId, action, expectedHash) {
+    const file = this.taskFile(projectId, taskId); if (!file) return null;
+    if (!['approve', 'continue'].includes(action)) return { error: '判断を指定してください', status: 400 };
+    const before = read(file);
+    if (hash(before) !== expectedHash) return { error: '確認中に作業が更新されました', status: 409 };
+    const raw = parseDoc(before).data.state || '未着手';
+    const text = setScalar(setScalar(before, 'state', action === 'approve' ? '完了' : raw === '完了' ? '実行中' : raw), 'updated', now());
+    fs.writeFileSync(file, text);
+    const key = `${projectId}/${taskId}`;
+    if (action === 'approve') this.completion.approveTask(key, text);
+    else this.completion.continueTask(key, readSteps(parseDoc(text).body));
+    return this.readTask(file);
+  }
+
   // 新しい作業ファイルを作る
-  createTask(projectId, { title, owner, next, role, parent, phase, via, steps }) {
+  createTask(projectId, { title, owner, model, effort, next, role, parent, phase, via, steps, kind, derivedFrom, workspaceMode }) {
     const dir = this.projectDir(projectId);
     if (!dir || !title || !String(title).trim()) return null;
+    let context; try { context = require('./work-context').validateTask(this.readProject(projectId), null, {parent,kind,derivedFrom,workspaceMode}, this.listProjects()); } catch(e) { return null; }
     const tdir = path.join(dir, '.ai', 'tasks');
     fs.mkdirSync(tdir, { recursive: true });
     const day = now().slice(0, 10).replace(/-/g, '');
-    let n = 1, id;
-    do { id = `${day}-${String(n).padStart(2, '0')}`; n++; } while (fs.existsSync(path.join(tdir, id + '.md')));
+    const id = require('./task-ids').reserveTaskId(this, projectId, dir, day);
     const one = scalar;
     const list = (Array.isArray(steps) ? steps : String(steps || '').split(/\r?\n/)).map(oneLine).filter(Boolean).slice(0, 12);
-    const text = `---\nid: ${id}\ntitle: ${one(title)}\nrole: ${one(role)}\nparent: ${one(parent)}\nphase: ${one(phase)}\nowner: ${one(owner)}\nvia: ${one(via)}\nstate: 未着手\nworkdir:\nmodel:\neffort:\nquestion:\nskills: []\nupdated: ${now()}\n---\n## 手順\n${list.map(x => `- [ ] ${x}`).join('\n')}\n\n## やったこと\n\n## 次にやること\n${one(next)}\n\n## 注意\n`;
-    fs.writeFileSync(path.join(tdir, id + '.md'), text);
+    const text = `---\nid: ${id}\ntitle: ${one(title)}\nrole: ${one(role)}\nparent: ${one(parent)}\nkind: ${context.kind}\nderivedFrom: ${one(context.derivedFrom)}\nworkspaceMode: ${context.workspaceMode}\nphase: ${one(phase)}\nowner: ${one(owner)}\nvia: ${one(via)}\nstate: 未着手\nworkdir:\nmodel: ${one(model)}\neffort: ${one(effort)}\nquestion:\nskills: []\nupdated: ${now()}\n---\n## 手順\n${list.map(x => `- [ ] ${x}`).join('\n')}\n\n## やったこと\n\n## 次にやること\n${one(next)}\n\n## 注意\n`;
+    fs.writeFileSync(path.join(tdir, id + '.md'), text, { flag: 'wx' });
     return this.readTask(path.join(tdir, id + '.md'));
   }
 }

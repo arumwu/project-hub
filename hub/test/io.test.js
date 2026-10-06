@@ -68,6 +68,36 @@ test('台帳と役割は要求内で一度だけ読み、外部編集は次の�
     assert.equal(state.value.projects.find(p => p.id === 'primary').notes, '最初のメモ');
     assert.equal(state.value.cliFlags.codex['GPT-6.1-Sol'], 'gpt-6.1-sol');
 
+    const modelFile = path.join(root, '_hub', 'model-view.json');
+    const copy = path.join(root, 'Work', 'primary', 'T'), taskFileForCopy = path.join(taskDir, 'T.md');
+    const originalTask = fs.readFileSync(taskFileForCopy, 'utf8');
+    fs.mkdirSync(copy, { recursive: true });
+    fs.writeFileSync(taskFileForCopy, originalTask.replace('state: 実行中', 'state: 実行中\nworkdir: ' + copy));
+    const settings = { initial: { ai: 'codex', model: 'GPT-6.1-Sol', effort: '極高' }, hidden: { codex: ['GPT-6-Astra'] }, order: ['codex|GPT-6.1-Sol'] };
+    fs.writeFileSync(modelFile, JSON.stringify(settings));
+    const measured = await countCalls('readFileSync', modelFile, () => countCalls('existsSync', copy, async () => {
+      const response = await fetch(base + '/api/state');
+      return { state: await response.json(), tag: response.headers.get('etag') };
+    }));
+    console.log('state I/O: model settings reads=' + measured.count + ', copy existence checks=' + measured.value.count);
+    assert.equal(measured.count, 1);
+    assert.equal(measured.value.count, 2); // 一覧の確認とGit情報の確認で各1回。
+    const snapshot = measured.value.value;
+    assert.deepEqual(snapshot.state.initialPick, settings.initial);
+    assert.deepEqual(snapshot.state.modelOrder, settings.order);
+    assert.deepEqual(snapshot.state.hiddenModels.codex, settings.hidden.codex);
+    assert.equal(snapshot.state.projects.find(p => p.id === 'primary').tasks[0].copy, true);
+    const unchanged = await fetch(base + '/api/state', { headers: { 'If-None-Match': snapshot.tag } });
+    assert.equal(unchanged.status, 304);
+    fs.rmdirSync(copy);
+    settings.initial.effort = '高'; fs.writeFileSync(modelFile, JSON.stringify(settings));
+    const fresh = await fetch(base + '/api/state', { headers: { 'If-None-Match': snapshot.tag } });
+    assert.equal(fresh.status, 200);
+    const freshState = await fresh.json();
+    assert.deepEqual(freshState.initialPick, settings.initial);
+    assert.equal(freshState.projects.find(p => p.id === 'primary').tasks[0].copyMissing, true);
+    fs.writeFileSync(taskFileForCopy, originalTask); fs.unlinkSync(modelFile);
+
     fs.writeFileSync(projectFile, fs.readFileSync(projectFile, 'utf8').replace('最初のメモ', '書き換えたメモ'));
     const originalRoles = fs.readFileSync(rolesFile, 'utf8');
     const changedRoles = originalRoles.replace(/(コーディング:\s*\{\s*main:\s*\[codex,\s*)GPT-6\.1-Sol,\s*高\]/,

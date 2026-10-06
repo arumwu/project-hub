@@ -1,0 +1,9 @@
+{
+  "name": "Project Hub",
+  "short_name": "Hub",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#121520",
+  "theme_color": "#121520",
+  "icons": [{ "src": "icon.png", "sizes": "1024x1024", "type": "image/png" }]
+}
