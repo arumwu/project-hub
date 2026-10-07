@@ -322,7 +322,7 @@ const sessionLinkRunner = new (require('./lib/session-link-runner').SessionLinkR
   referenceFor: async id => { const reference = await sessionLinks.referenceFor(id); await procwatch.scan(); return { ...reference, active: linkedSourceBusy(reference, id) }; },
   history: id => linkedHistory(id), message: (code, fallback) => sessionLinks.runnerMessage(code, fallback),
 });
-const updateBusy = () => sessionLinks.running || sessionLinkRunner.busy() || aiTools.isOperating() || sessions.list().some(x => x.running) || chats.running.size > 0 || procwatch.list().length > 0 ||
+const updateBusy = () => sessionLinks.running || sessionLinkRunner.busy() || aiTools.isOperating() || sessions.list().some(x => x.running) || chats.running.size > 0 || procwatch.list().some(x => x.project) ||
   store.listProjects().some(p => maintenance.locked(p.id) || github.locked(baseOf(p)) || p.tasks.some(t => chats.queue(p.id, t.id).length > 0));
 const automation = process.env.HUB_AUTO_TRANSLATE === '1' && process.env.HUB_TRANSLATION_FORK
   ? require('./lib/app-update-workflow').createAutomation({ root: ROOT, env: process.env }) : {};

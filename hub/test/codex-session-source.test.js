@@ -20,8 +20,20 @@ test('SQLite/index/header metadata merge preserves recent App title, provenance,
  assert.equal((await f.source().discover()).sessions.find(session=>session.title==='Latest App title').id,one.id);assert.deepEqual(f.snapshot(),before);
 });
 test('WAL metadata with and without shm remains byte/mtime/name read-only and uses explicit bounded header fallback',async t=>{
- for(const removeShm of [false,true]){const f=fixture(t),file=f.history('wal-thread',[item('user','Text')]),db=f.database();db.db.exec('PRAGMA journal_mode=WAL');db.add({id:'wal-thread',file,title:'Uncheckpointed SQLite name'});if(removeShm)fs.unlinkSync(db.file+'-shm');
-  const before=f.snapshot(),result=await f.source().discover();assert.equal(result.sessions.length,1);assert.match(result.warnings.join(' '),/pending journal/);assert.notEqual(result.sessions[0].title,'Uncheckpointed SQLite name');assert.deepEqual(f.snapshot(),before);db.db.close();}
+ for(const removeShm of [false,true]){
+  const f=fixture(t),file=f.history('wal-thread',[item('user','Text')]),db=f.database();let closed=false;
+  try{
+   db.db.exec('PRAGMA journal_mode=WAL');db.add({id:'wal-thread',file,title:'Uncheckpointed SQLite name'});
+   if(removeShm){
+    // Windows cannot unlink a live SQLite mapping. Reconstruct the same pending WAL
+    // state after closing the writer instead of deleting its open shared-memory file.
+    const main=fs.readFileSync(db.file),wal=fs.readFileSync(db.file+'-wal');db.db.close();closed=true;
+    fs.writeFileSync(db.file,main);fs.writeFileSync(db.file+'-wal',wal);if(fs.existsSync(db.file+'-shm'))fs.unlinkSync(db.file+'-shm');
+    assert.ok(wal.length>0);assert.equal(fs.existsSync(db.file+'-shm'),false);
+   }
+   const before=f.snapshot(),result=await f.source().discover();assert.equal(result.sessions.length,1);assert.match(result.warnings.join(' '),/pending journal/);assert.notEqual(result.sessions[0].title,'Uncheckpointed SQLite name');assert.deepEqual(f.snapshot(),before);
+  }finally{if(!closed)db.db.close();}
+ }
 });
 test('Separate SQLite roots/env work, old index names do not override newer DB title, and App Server is not guessed to be Desktop',async t=>{
  const f=fixture(t),file=f.history('thread-one',[],{source:'appServer',originator:'custom-client'}),sqlite=path.join(f.base,'sqlite'),db=f.database(sqlite);db.add({id:'thread-one',file,title:'Newer SQLite title',source:'appServer',originator:'custom-client',updated:1791446400000});db.db.close();
