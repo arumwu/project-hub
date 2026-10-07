@@ -1,4 +1,5 @@
 'use strict';
+const { lt, sectionNames, sectionName, label } = require('./locale');
 // 台帳（Product/<プロジェクト>/PROJECT.md）と作業ファイル（.ai/tasks/<作業ID>.md）の読み書き
 const fs = require('fs');
 const path = require('path');
@@ -94,7 +95,7 @@ function readSteps(body) {
   const out = [];
   let inside = false;
   for (const line of body.split(/\r?\n/)) {
-    if (/^##\s/.test(line)) { inside = /^##\s+手順/.test(line); continue; }
+    if (/^##\s/.test(line)) { inside = /^##\s+(?:手順|步驟)/.test(line); continue; }
     const m = inside && line.match(STEP);
     if (m) out.push({ text: m[2].trim(), done: m[1] !== ' ' });
   }
@@ -126,7 +127,7 @@ function setPhaseLine(text, name, state) {
 }
 
 function pick(secs, word) {
-  const k = Object.keys(secs).find(s => s.includes(word));
+  const k = Object.keys(secs).find(s => sectionNames(word).some(name => s.includes(name)));
   return k ? secs[k] : '';
 }
 
@@ -238,14 +239,14 @@ class Store {
   // 新しいプロジェクト：ひな形（CLAUDE.md・AGENTS.md・.ai/ など）を写し、台帳を書く
   createProject({ name, description, body, phases, parent, derivedFrom, related, refs }, templateDir) {
     const nm = oneLine(name).replace(/[\/\\\0]/g, '・').slice(0, 60);
-    if (!nm || nm === '.' || nm === '..' || nm.startsWith('.') || nm.startsWith('_')) return { error: 'プロジェクト名を入れてください' };
+    if (!nm || nm === '.' || nm === '..' || nm.startsWith('.') || nm.startsWith('_')) return { error: lt('プロジェクト名を入れてください') };
     const projects = this.listProjects();
     const { Hierarchy } = require('./hierarchy');
     const h = new Hierarchy(this);
     try { parent = h.resolve(parent, projects); derivedFrom = h.resolve(derivedFrom, projects); } catch(e) { return { error: e.message }; }
-    if (projects.some(p => p.name === nm)) return { error: '同じ名前のプロジェクトがあります' };
+    if (projects.some(p => p.name === nm)) return { error: lt('同じ名前のプロジェクトがあります') };
     const dir = path.join(this.product, nm);
-    if (fs.existsSync(dir)) return { error: `「${nm}」はもうあります` };
+    if (fs.existsSync(dir)) return { error: lt`「${nm}」はもうあります` };
     fs.mkdirSync(dir, { recursive: true });
     if (templateDir && fs.existsSync(templateDir)) {
       fs.cpSync(templateDir, dir, { recursive: true, filter: src => path.basename(src) !== '.gitkeep' && path.basename(src) !== 'PROJECT.md' });
@@ -263,7 +264,7 @@ class Store {
       `parent: ${q(parent)}`,
       `derivedFrom: ${q(derivedFrom)}`,
       'phases:',
-      ...(list.length ? list : ['計画', '作る', 'チェック', '仕上げ']).map((ph, i) => `  - { name: ${ph.replace(/[,{}]/g, '・')}, state: ${i === 0 ? '進行中' : '未着手'} }`),
+      ...(list.length ? list : [lt('計画'), lt('作る'), label('チェック'), lt('仕上げ')]).map((ph, i) => `  - { name: ${ph.replace(/[,{}]/g, '・')}, state: ${i === 0 ? '進行中' : '未着手'} }`),
       'folders:',
       ...(oneLine(body) ? [`  本体: ${q(oneLine(body))}`] : []),
       ...(Array.isArray(refs) ? refs : []).map(oneLine).filter(Boolean).slice(0, 30).map((r, i) => `  参考${i + 1}: ${q(r)}`),
@@ -272,7 +273,7 @@ class Store {
       'issues: []',
       '---',
       '',
-      '# メモ',
+      lt('# メモ'),
       '',
     ].join('\n');
     fs.writeFileSync(path.join(dir, 'PROJECT.md'), text);
@@ -341,9 +342,9 @@ class Store {
     text = setScalar(text, 'updated', now());
     if (memo && String(memo).trim()) {
       const line = `- ${now()} ${String(memo).replace(/[\r\n]+/g, ' ').trim()}`;
-      text = /^## メモ\s*$/m.test(text)
-        ? text.replace(/^## メモ\s*$/m, m => `${m}\n${line}`)
-        : text.replace(/\s*$/, `\n\n## メモ\n${line}\n`);
+      text = /^## (?:メモ|備註)\s*$/m.test(text)
+        ? text.replace(/^## (?:メモ|備註)\s*$/m, m => `${m}\n${line}`)
+        : text.replace(/\s*$/, lt`\n\n## メモ\n${line}\n`);
     }
     fs.writeFileSync(file, text);
     if (preserve && parseDoc(text).data.state === '完了') this.completion.approveTask(key, text);
@@ -358,7 +359,7 @@ class Store {
     const lines = before.split('\n');
     let inside = false, n = -1, hit = false;
     for (let i = 0; i < lines.length; i++) {
-      if (/^##\s/.test(lines[i])) { inside = /^##\s+手順/.test(lines[i]); continue; }
+      if (/^##\s/.test(lines[i])) { inside = /^##\s+(?:手順|步驟)/.test(lines[i]); continue; }
       if (inside && STEP.test(lines[i]) && ++n === index) { lines[i] = lines[i].replace(/\[[ xX]\]/, done ? '[x]' : '[ ]'); hit = true; break; }
     }
     if (!hit) return null;
@@ -377,7 +378,7 @@ class Store {
     const item = oneLine(textIn).slice(0, 120);
     if (!file || !item) return null;
     const lines = read(file).split('\n');
-    const h = lines.findIndex(l => /^##\s+手順/.test(l));
+    const h = lines.findIndex(l => /^##\s+(?:手順|步驟)/.test(l));
     if (h >= 0) {
       let end = h + 1;
       for (let i = h + 1; i < lines.length && !/^##\s/.test(lines[i]); i++) if (STEP.test(lines[i])) end = i + 1;
@@ -386,7 +387,7 @@ class Store {
       if (blank >= 0) lines[blank] = `- [ ] ${item}`; else lines.splice(end, 0, `- [ ] ${item}`);
     } else {
       const close = lines.indexOf('---', 1);
-      lines.splice(close + 1, 0, '## 手順', `- [ ] ${item}`, '');
+      lines.splice(close + 1, 0, lt('## 手順'), `- [ ] ${item}`, '');
     }
     let text = setScalar(lines.join('\n'), 'updated', now());
     if (parseDoc(text).data.state === '完了') text = setScalar(text, 'state', '実行中');
@@ -399,8 +400,8 @@ class Store {
     const file = this.taskFile(projectId, taskId), add = String(block || '').replace(/\s+$/, '');
     if (!file || !add) return null;
     const lines = read(file).replace(/\s*$/, '\n').split('\n');
-    const h = lines.findIndex(l => l.replace(/^##\s+/, '').trim() === heading && /^##\s/.test(l));
-    if (h < 0) lines.splice(lines.length - 1, 0, '', `## ${heading}`, add);
+    const h = lines.findIndex(l => sectionNames(heading).some(name => { const title = l.replace(/^##\s+/, '').trim(); return title === name || title.startsWith(name + '（') || title.startsWith(name + '('); }) && /^##\s/.test(l));
+    if (h < 0) lines.splice(lines.length - 1, 0, '', `## ${sectionName(heading)}`, add);
     else {
       let end = h + 1;
       for (let i = h + 1; i < lines.length && !/^##\s/.test(lines[i]); i++) if (lines[i].trim()) end = i + 1;
@@ -449,9 +450,9 @@ class Store {
 
   decideTask(projectId, taskId, action, expectedHash) {
     const file = this.taskFile(projectId, taskId); if (!file) return null;
-    if (!['approve', 'continue'].includes(action)) return { error: '判断を指定してください', status: 400 };
+    if (!['approve', 'continue'].includes(action)) return { error: lt('判断を指定してください'), status: 400 };
     const before = read(file);
-    if (hash(before) !== expectedHash) return { error: '確認中に作業が更新されました', status: 409 };
+    if (hash(before) !== expectedHash) return { error: lt('確認中に作業が更新されました'), status: 409 };
     const raw = parseDoc(before).data.state || '未着手';
     const text = setScalar(setScalar(before, 'state', action === 'approve' ? '完了' : raw === '完了' ? '実行中' : raw), 'updated', now());
     fs.writeFileSync(file, text);
@@ -472,7 +473,7 @@ class Store {
     const id = require('./task-ids').reserveTaskId(this, projectId, dir, day);
     const one = scalar;
     const list = (Array.isArray(steps) ? steps : String(steps || '').split(/\r?\n/)).map(oneLine).filter(Boolean).slice(0, 12);
-    const text = `---\nid: ${id}\ntitle: ${one(title)}\nrole: ${one(role)}\nparent: ${one(parent)}\nkind: ${context.kind}\nderivedFrom: ${one(context.derivedFrom)}\nworkspaceMode: ${context.workspaceMode}\nphase: ${one(phase)}\nowner: ${one(owner)}\nvia: ${one(via)}\nstate: 未着手\nworkdir:\nmodel: ${one(model)}\neffort: ${one(effort)}\nquestion:\nskills: []\nupdated: ${now()}\n---\n## 手順\n${list.map(x => `- [ ] ${x}`).join('\n')}\n\n## やったこと\n\n## 次にやること\n${one(next)}\n\n## 注意\n`;
+    const text = lt`---\nid: ${id}\ntitle: ${one(title)}\nrole: ${one(role)}\nparent: ${one(parent)}\nkind: ${context.kind}\nderivedFrom: ${one(context.derivedFrom)}\nworkspaceMode: ${context.workspaceMode}\nphase: ${one(phase)}\nowner: ${one(owner)}\nvia: ${one(via)}\nstate: 未着手\nworkdir:\nmodel: ${one(model)}\neffort: ${one(effort)}\nquestion:\nskills: []\nupdated: ${now()}\n---\n## 手順\n${list.map(x => `- [ ] ${x}`).join('\n')}\n\n## やったこと\n\n## 次にやること\n${one(next)}\n\n## 注意\n`;
     fs.writeFileSync(path.join(tdir, id + '.md'), text, { flag: 'wx' });
     return this.readTask(path.join(tdir, id + '.md'));
   }

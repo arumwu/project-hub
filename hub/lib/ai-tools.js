@@ -1,4 +1,5 @@
 'use strict';
+const { lt } = require("./locale");
 // インストール済み CLI の版・更新・モデル一覧。CLI の実行は固定した引数だけを execFile に渡す。
 const fs = require('fs');
 const os = require('os');
@@ -28,8 +29,8 @@ function runFile(file, args, opts = {}) {
 }
 
 function failure(stage, err) {
-  const detail = err?.killed ? '時間切れ' : typeof err?.code === 'number' ? `終了コード ${err.code}` : 'CLI を実行できませんでした';
-  return toolError(502, stage, `${stage === 'update' ? '更新' : 'モデル再取得'}に失敗しました（${detail}）`);
+  const detail = err?.killed ? lt('時間切れ') : typeof err?.code === 'number' ? lt`終了コード ${err.code}` : lt('CLI を実行できませんでした');
+  return toolError(502, stage, lt`${stage === 'update' ? lt('更新') : lt('モデル再取得')}に失敗しました（${detail}）`);
 }
 
 // PATH の中から探す。結果は30秒だけ覚える（一覧のたびに PATH を全部確かめないため。入れ直した時は30秒で反映）
@@ -59,7 +60,7 @@ function methodFor(ai, file) {
 }
 
 function cleanModels(rows) {
-  if (!Array.isArray(rows)) throw toolError(502, 'models', 'モデル一覧の形式が正しくありません');
+  if (!Array.isArray(rows)) throw toolError(502, 'models', lt('モデル一覧の形式が正しくありません'));
   const seen = new Set();
   return rows.filter(row => row && typeof row.id === 'string' && ID.test(row.id))
     .map(row => ({ id: row.id, label: typeof row.label === 'string' && row.label.length <= 80 ? row.label : row.id }))
@@ -87,23 +88,23 @@ function uniqueLabels(known, current) {
 
 function codexModels(json) {
   const rows = JSON.parse(json).models;
-  if (!Array.isArray(rows)) throw toolError(502, 'models', 'Codex のモデル一覧を読めませんでした');
+  if (!Array.isArray(rows)) throw toolError(502, 'models', lt('Codex のモデル一覧を読めませんでした'));
   const models = cleanModels(rows.filter(row => row && row.visibility === 'list').map(row => ({ id: row.slug, label: row.display_name || row.slug })));
-  if (!models.length) throw toolError(502, 'models', 'Codex の表示対象モデルが見つかりませんでした');
+  if (!models.length) throw toolError(502, 'models', lt('Codex の表示対象モデルが見つかりませんでした'));
   return models;
 }
 
 function agyModels(text) {
   const found = String(text).split(/\r?\n/).map(line => line.split('\t')).find(([id]) => id === AGY_MODEL.id);
-  if (!found) { const error = toolError(502, 'models', 'Agy の一覧に承認された Gemini 3.1 Pro (High) がありません。別のモデルへは切り替えません'); error.unavailable = true; throw error; }
+  if (!found) { const error = toolError(502, 'models', lt('Agy の一覧に承認された Gemini 3.1 Pro (High) がありません。別のモデルへは切り替えません')); error.unavailable = true; throw error; }
   return [{ ...AGY_MODEL }];
 }
 
 function claudeModels(json) {
   const rows = JSON.parse(json)?.catalog?.config?.models;
-  if (!Array.isArray(rows)) throw toolError(502, 'models', 'Claude Code のモデル一覧を読めませんでした');
+  if (!Array.isArray(rows)) throw toolError(502, 'models', lt('Claude Code のモデル一覧を読めませんでした'));
   const models = cleanModels(rows.filter(row => row && row.section === 'main').map(row => ({ id: row.id, label: row.name || row.id })));
-  if (!models.length) throw toolError(502, 'models', 'Claude Code の表示対象モデルが見つかりませんでした');
+  if (!models.length) throw toolError(502, 'models', lt('Claude Code の表示対象モデルが見つかりませんでした'));
   return models;
 }
 
@@ -141,7 +142,7 @@ function claudeInitialize(file, timeoutMs = 12000) {
     const timer = setTimeout(() => { timedOut = true; stopChild(); }, timeoutMs);
     child.stdout.on('data', chunk => {
       bytes += chunk.length;
-      if (bytes > MAX_OUTPUT) { pendingError = toolError(502, 'models', 'Claude Code の応答が大きすぎます'); stopChild(); return; }
+      if (bytes > MAX_OUTPUT) { pendingError = toolError(502, 'models', lt('Claude Code の応答が大きすぎます')); stopChild(); return; }
       buf += chunk.toString('utf8');
       const lines = buf.split('\n'); buf = lines.pop();
       for (const line of lines) {
@@ -156,8 +157,8 @@ function claudeInitialize(file, timeoutMs = 12000) {
     });
     child.stdin.on('error', () => {});
     child.stderr.on('data', () => {}); // アカウント情報をログや API に出さない
-    child.on('error', () => finish(toolError(502, 'models', 'Claude Code を起動できませんでした')));
-    child.on('close', () => finish(pendingError || (timedOut ? toolError(502, 'models', 'Claude Code のモデル取得が時間切れになりました') : success ? null : toolError(502, 'models', 'Claude Code がモデル一覧を返しませんでした'))));
+    child.on('error', () => finish(toolError(502, 'models', lt('Claude Code を起動できませんでした'))));
+    child.on('close', () => finish(pendingError || (timedOut ? toolError(502, 'models', lt('Claude Code のモデル取得が時間切れになりました')) : success ? null : toolError(502, 'models', lt('Claude Code がモデル一覧を返しませんでした')))));
     child.stdin.write(JSON.stringify({ type: 'control_request', request_id: 'hub-model-catalog', request: { subtype: 'initialize' } }) + '\n');
   });
 }
@@ -225,7 +226,7 @@ class AiTools {
       const number = value.match(/\b\d+\.\d+\.\d+(?:[-+][\w.]+)?\b/);
       if (number) return number[0];
     } catch (e) { /* status は不明、更新後は検証失敗として返す */ }
-    if (strict) throw toolError(502, 'verify', '更新は実行されましたが、CLI の版を確認できませんでした');
+    if (strict) throw toolError(502, 'verify', lt('更新は実行されましたが、CLI の版を確認できませんでした'));
     return '';
   }
 
@@ -246,25 +247,25 @@ class AiTools {
   }
 
   async checkUpdate(ai) {
-    if (!AIS.includes(ai)) throw toolError(400, 'input', 'AI の指定が正しくありません');
-    if (this.operation?.ai === ai && this.operation.kind === 'update') throw toolError(409, 'busy', 'このAIの更新適用が終わってから確認してください');
+    if (!AIS.includes(ai)) throw toolError(400, 'input', lt('AI の指定が正しくありません'));
+    if (this.operation?.ai === ai && this.operation.kind === 'update') throw toolError(409, 'busy', lt('このAIの更新適用が終わってから確認してください'));
     if (this.checking.has(ai)) return this.checking.get(ai);
     const file = this.find(ai);
-    if (!file) throw toolError(400, 'detect', `${AI_LABEL[ai]} が見つかりません`);
+    if (!file) throw toolError(400, 'detect', lt`${AI_LABEL[ai]} が見つかりません`);
     const pending = (async () => {
       const epoch = this.updateEpoch[ai] || 0;
       try {
         const currentVersion = await this.version(ai, file);
-        if (!currentVersion && !this.dry) throw Error('現在版が不明');
+        if (!currentVersion && !this.dry) throw Error(lt('現在版が不明'));
         const method = this.methods[ai] || methodFor(ai, file);
         const latest = this.dry ? { version: currentVersion || '0.0.0', source: 'dry-run' } : await this.latest(ai, method, this.home);
-        if (epoch !== (this.updateEpoch[ai] || 0) || this.operation?.ai === ai && this.operation.kind === 'update') throw toolError(409, 'busy', '確認中に更新が適用されました。適用後に確認してください');
+        if (epoch !== (this.updateEpoch[ai] || 0) || this.operation?.ai === ai && this.operation.kind === 'update') throw toolError(409, 'busy', lt('確認中に更新が適用されました。適用後に確認してください'));
         const result = { ok: true, ai, currentVersion, latestVersion: latest.version, source: latest.source,
           available: newer(latest.version, currentVersion), checkedAt: new Date().toISOString(), applicable: ['standalone', 'native', 'homebrew-cask'].includes(method) };
         this.updateChecks[ai] = result; return result;
       } catch (e) {
         if (e.status === 409) throw e;
-        this.updateChecks[ai] = { ...this.updateChecks[ai], ok: false, available: null, error: '更新情報を確認できませんでした。配布元への接続とCLIの版を確認してください', failedAt: new Date().toISOString() };
+        this.updateChecks[ai] = { ...this.updateChecks[ai], ok: false, available: null, error: lt('更新情報を確認できませんでした。配布元への接続とCLIの版を確認してください'), failedAt: new Date().toISOString() };
         throw toolError(502, 'check', this.updateChecks[ai].error);
       }
     })();
@@ -273,12 +274,12 @@ class AiTools {
   }
 
   check(ai) {
-    if (!AIS.includes(ai)) throw toolError(400, 'input', 'AI の指定が正しくありません');
-    if (this.operation) throw toolError(409, 'busy', '別の更新・モデル再取得が進行中です');
+    if (!AIS.includes(ai)) throw toolError(400, 'input', lt('AI の指定が正しくありません'));
+    if (this.operation) throw toolError(409, 'busy', lt('別の更新・モデル再取得が進行中です'));
     const n = this.busy();
-    if (n) throw toolError(409, 'busy', `動いている AI が ${n} つあります。止めてから更新してください`);
+    if (n) throw toolError(409, 'busy', lt`動いている AI が ${n} つあります。止めてから更新してください`);
     const file = this.find(ai);
-    if (!file) throw toolError(400, 'detect', `${AI_LABEL[ai]} が見つかりません`);
+    if (!file) throw toolError(400, 'detect', lt`${AI_LABEL[ai]} が見つかりません`);
     if (ai === 'agy') { const error = agyAccountError(this.home); if (error) throw toolError(409, 'auth', error); }
     return { file, method: this.methods[ai] || methodFor(ai, file) };
   }
@@ -286,7 +287,7 @@ class AiTools {
   saveCatalog(ai, found) {
     const previous = new Set(this.catalogs[ai].models.map(x => x.id));
     const clean = uniqueLabels(this.catalogs[ai].known, cleanModels(found.models));
-    if (!clean.length && !(ai === 'agy' && found.unavailable)) throw toolError(502, 'models', '取得したモデル一覧が空のため、以前の候補を残しました');
+    if (!clean.length && !(ai === 'agy' && found.unavailable)) throw toolError(502, 'models', lt('取得したモデル一覧が空のため、以前の候補を残しました'));
     const known = mergeKnown(this.catalogs[ai].known, clean);
     const refreshedAt = new Date().toISOString();
     const next = { ...this.catalogs, [ai]: { models: clean, known, refreshedAt, source: found.source } };
@@ -301,7 +302,7 @@ class AiTools {
     }
     this.catalogs = next;
     return { ok: true, models: clean, added: clean.filter(x => !previous.has(x.id)).length, refreshedAt, source: found.source,
-      ...(found.unavailable ? { unavailable: true, warning: '承認された Gemini 3.1 Pro (High) が一覧から外れたため、Agy を選べない状態にしました。別のモデルへは切り替えません' } : {}) };
+      ...(found.unavailable ? { unavailable: true, warning: lt('承認された Gemini 3.1 Pro (High) が一覧から外れたため、Agy を選べない状態にしました。別のモデルへは切り替えません') } : {}) };
   }
 
   async fetchModels(ai, file) {
@@ -316,14 +317,14 @@ class AiTools {
     const after = latestClaudeCache(this.home);
     const unchanged = !after || (before && after.file === before.file && after.mtime <= before.mtime);
     if (unchanged) {
-      if (!this.catalogs.claude.models.length) throw toolError(502, 'models', 'Claude Code の新しいモデル一覧を確認できませんでした');
+      if (!this.catalogs.claude.models.length) throw toolError(502, 'models', lt('Claude Code の新しいモデル一覧を確認できませんでした'));
       return { models: this.catalogs.claude.models, source: this.catalogs.claude.source, unchanged: true };
     }
     try {
       const models = claudeModels(fs.readFileSync(after.file, 'utf8'));
       const matches = id => liveIds.includes(id) || ['opus', 'sonnet', 'haiku'].some(family => id.startsWith(`claude-${family}-`) && liveIds.includes(family));
       if (!Array.isArray(liveIds) || !models.every(row => matches(row.id))) {
-        if (!this.catalogs.claude.models.length) throw toolError(502, 'models', 'Claude Code の応答とモデル一覧が一致しません');
+        if (!this.catalogs.claude.models.length) throw toolError(502, 'models', lt('Claude Code の応答とモデル一覧が一致しません'));
         return { models: this.catalogs.claude.models, source: this.catalogs.claude.source, unchanged: true };
       }
       return {
@@ -331,7 +332,7 @@ class AiTools {
         source: 'claude-cache',
       };
     }
-    catch (e) { throw e.status ? e : toolError(502, 'models', 'Claude Code のモデル一覧を読めませんでした'); }
+    catch (e) { throw e.status ? e : toolError(502, 'models', lt('Claude Code のモデル一覧を読めませんでした')); }
   }
 
   async refresh(ai) {
@@ -342,7 +343,7 @@ class AiTools {
       const found = await this.fetchModels(ai, file);
       const result = found.unchanged
         ? { ok: true, models: this.catalogs[ai].models, added: 0, refreshedAt: this.catalogs[ai].refreshedAt,
-          source: this.catalogs[ai].source, unchanged: true, warning: 'Claude Code のローカル候補を新しく確認できず、前回の内容を残しました' }
+          source: this.catalogs[ai].source, unchanged: true, warning: lt('Claude Code のローカル候補を新しく確認できず、前回の内容を残しました') }
         : this.saveCatalog(ai, found);
       return { ai, ...result };
     } catch (e) { throw e.status ? e : failure('models', e); }
@@ -356,8 +357,8 @@ class AiTools {
     else if (ai === 'claude' && method === 'homebrew-cask') { updater = this.find('brew'); args = ['upgrade', '--cask', 'claude-code@latest']; }
     else if (ai === 'claude' && method === 'native') { updater = file; args = ['update']; }
     else if (ai === 'agy' && method === 'native') { updater = file; args = ['update']; }
-    else throw toolError(400, 'detect', 'この導入方法の更新手順を確認できませんでした');
-    if (!updater) throw toolError(400, 'detect', 'Homebrew が見つかりません');
+    else throw toolError(400, 'detect', lt('この導入方法の更新手順を確認できませんでした'));
+    if (!updater) throw toolError(400, 'detect', lt('Homebrew が見つかりません'));
     if (this.dry) return { ok: true, dry: true, ai, beforeVersion: '', afterVersion: '', changed: false, models: { ok: true, models: this.catalogs[ai].models, added: 0 } };
     this.operation = { ai, kind: 'update', startedAt: new Date().toISOString() };
     this.updateEpoch[ai] = (this.updateEpoch[ai] || 0) + 1;
@@ -373,7 +374,7 @@ class AiTools {
         const found = await this.fetchModels(ai, this.find(ai) || file);
         models = found.unchanged
           ? { ok: true, models: this.catalogs[ai].models, added: 0, refreshedAt: this.catalogs[ai].refreshedAt,
-            source: this.catalogs[ai].source, unchanged: true, warning: 'Claude Code のローカル候補を新しく確認できず、前回の内容を残しました' }
+            source: this.catalogs[ai].source, unchanged: true, warning: lt('Claude Code のローカル候補を新しく確認できず、前回の内容を残しました') }
           : this.saveCatalog(ai, found);
       }
       catch (e) { models = { ok: false, error: e.status ? e.reason : failure('models', e).reason }; }

@@ -1,4 +1,6 @@
 'use strict';
+const {trashRootFor}=require('./trash');
+const { lt } = require("./locale");
 // Git の出し入れ：作業ごとの作業用コピー（worktree）を作る・本体に取り込む・片付ける
 // Git の無いフォルダは、最初に保存を始める（作業用コピーは作らない）
 const fs = require('fs');
@@ -86,10 +88,10 @@ function tooBig(dir) {
 
 // Git の無いフォルダで保存を始める。できなければ理由を返す
 function init(dir) {
-  if (tooBig(dir)) return { ok: false, reason: 'ファイルが多すぎるため、Git の保存は始めませんでした' };
+  if (tooBig(dir)) return { ok: false, reason: lt('ファイルが多すぎるため、Git の保存は始めませんでした') };
   git(dir, ['init', '-q']);
   stageAll(dir);
-  git(dir, ['commit', '-q', '--no-verify', '--allow-empty', '-m', 'Project Hub: 最初の保存']);
+  git(dir, ['commit', '-q', '--no-verify', '--allow-empty', '-m', lt('Project Hub: 最初の保存')]);
   return { ok: true };
 }
 
@@ -100,7 +102,7 @@ const branchName = s => 'hub/' + (String(s).replace(/[\s~^:?*[\\\x00-\x1f\x7f]+|
 // 作業を始める前の準備。作業する場所と、何をしたかを返す
 //   base: 本体のフォルダ / workRoot: AI-Workspace/Work/<プロジェクト>
 function prepare({ base, workRoot, taskId, direct }) {
-  if (!available()) return { dir: base, note: 'Git が無いため、本体で作業します' };
+  if (!available()) return { dir: base, note: lt('Git が無いため、本体で作業します') };
   let top = repoTop(base);
   // 台帳のフォルダが別の Git の中にある時は、台帳だけの保存を始める
   if (top && direct && real(top) !== real(base)) top = null;
@@ -108,15 +110,15 @@ function prepare({ base, workRoot, taskId, direct }) {
     const r = init(base);
     if (!r.ok) return { dir: base, note: r.reason };
     git(base, ['config', 'hub.mode', 'direct']);
-    return { dir: base, note: 'Git の保存を始めました（本体で作業します）', inited: true };
+    return { dir: base, note: lt('Git の保存を始めました（本体で作業します）'), inited: true };
   }
   // 元々 Git の無かったフォルダ・台帳のフォルダは、本体で作業する（始める前に保存だけする）
   if (direct || tryGit(top, ['config', 'hub.mode']) === 'direct') {
-    save(top, '作業前の保存');
-    return { dir: base, note: '作業前に保存しました' };
+    save(top, lt('作業前の保存'));
+    return { dir: base, note: lt('作業前に保存しました') };
   }
   // まだ一度も保存していない Git なら、まず保存する
-  if (!tryGit(top, ['rev-parse', '--verify', 'HEAD'])) { stageAll(top); git(top, ['commit', '-q', '--no-verify', '--allow-empty', '-m', 'Project Hub: 最初の保存']); }
+  if (!tryGit(top, ['rev-parse', '--verify', 'HEAD'])) { stageAll(top); git(top, ['commit', '-q', '--no-verify', '--allow-empty', '-m', lt('Project Hub: 最初の保存')]); }
   const wt = path.join(workRoot, taskId);
   const rel = path.relative(top, base);
   if (fs.existsSync(wt)) return { dir: path.join(wt, rel), worktree: wt };
@@ -125,7 +127,7 @@ function prepare({ base, workRoot, taskId, direct }) {
   const exists = tryGit(top, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
   git(top, exists ? ['worktree', 'add', '-q', wt, branch] : ['worktree', 'add', '-q', '-b', branch, wt, 'HEAD']);
   const copied = copyLocalFiles(top, wt);
-  return { dir: path.join(wt, rel), worktree: wt, created: true, branch, copied, note: `この作業専用の作業用コピーを作りました${copied.length ? `（${copied.join('・')} も写しました）` : ''}` };
+  return { dir: path.join(wt, rel), worktree: wt, created: true, branch, copied, note: lt`この作業専用の作業用コピーを作りました${copied.length ? lt`（${copied.join('・')} も写しました）` : ''}` };
 }
 
 // Git に入っていない手元の設定（.env など）を作業用コピーにも写す。無いと AI のテストが動かないため
@@ -178,7 +180,7 @@ function toTrash(dir, trash) {
   return dest;
 }
 function trashPath(dir, trash) {
-  const bin = trash || process.env.HUB_TRASH || path.join(os.homedir(), '.Trash');
+  const bin = trashRootFor(dir, trash || process.env.HUB_TRASH || path.join(os.homedir(), '.Trash'));
   fs.mkdirSync(bin, { recursive: true });
   let dest = path.join(bin, path.basename(dir));
   if (fs.existsSync(dest)) dest += ' ' + new Date().toISOString().replace(/[:.]/g, '-');
@@ -188,23 +190,23 @@ function trashPath(dir, trash) {
 // 作業用コピーを本体に取り込み、片付ける。ぶつかったら何も変えずに conflict を返す
 function merge({ dir, workRoot, title, target, cleanup = true }) {
   const wt = repoTop(dir);
-  if (!wt) return { ok: false, error: '作業用コピーが見つかりません' };
+  if (!wt) return { ok: false, error: lt('作業用コピーが見つかりません') };
   const inside = path.relative(workRoot, wt);
-  if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) return { ok: false, error: 'Work フォルダの作業用コピーではありません' };
+  if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) return { ok: false, error: lt('Work フォルダの作業用コピーではありません') };
   const origin = mainOf(wt);
   const main = target ? repoTop(target) : origin;
-  if (!main) return { ok: false, error: 'Git の作業用コピーではありません' };
-  if (!origin || main === wt || git(main, ['rev-parse', '--path-format=absolute', '--git-common-dir']) !== git(wt, ['rev-parse', '--path-format=absolute', '--git-common-dir'])) return { ok: false, error: '統合先は同じ本体の別の作業用コピーにしてください' };
+  if (!main) return { ok: false, error: lt('Git の作業用コピーではありません') };
+  if (!origin || main === wt || git(main, ['rev-parse', '--path-format=absolute', '--git-common-dir']) !== git(wt, ['rev-parse', '--path-format=absolute', '--git-common-dir'])) return { ok: false, error: lt('統合先は同じ本体の別の作業用コピーにしてください') };
   const branch = git(wt, ['rev-parse', '--abbrev-ref', 'HEAD']);
-  save(wt, `${title}（作業の保存）`);
-  save(main, '取り込み前の保存');
+  save(wt, lt`${title}（作業の保存）`);
+  save(main, lt('取り込み前の保存'));
   const before = git(main, ['rev-parse', 'HEAD']);
   const already = isAncestor(main, git(wt, ['rev-parse', 'HEAD']));
   try {
     if (!already) git(main, ['merge', '--no-ff', '--no-edit', '-m', `取り込み: ${title}`, branch]);
   } catch (e) {
     tryGit(main, ['merge', '--abort']);
-    return { ok: false, conflict: true, error: '本体とぶつかったため、取り込みませんでした' };
+    return { ok: false, conflict: true, error: lt('本体とぶつかったため、取り込みませんでした') };
   }
   const commit = git(main, ['rev-parse', 'HEAD']);
   const files = (tryGit(main, ['diff', '--name-only', '-z', before, commit]) || '').split('\0').filter(Boolean);
@@ -222,10 +224,10 @@ function inspect(dir) {
     digest.update(String(data.length)+':').update(data);
   }
   const files = execFileSync('git',['-C',wt,'ls-files','--others','--exclude-standard','-z'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).split('\0').filter(Boolean).sort();
-  let bytes=0;if(files.length>MAX_FILES)throw Error('未追跡ファイルが多すぎて照合できません');
+  let bytes=0;if(files.length>MAX_FILES)throw Error(lt('未追跡ファイルが多すぎて照合できません'));
   for (const f of files) {
     const file=path.join(wt,f),st=fs.lstatSync(file);
-    if((bytes+=st.size)>256*1024*1024)throw Error('未追跡ファイルが大きすぎて照合できません');
+    if((bytes+=st.size)>256*1024*1024)throw Error(lt('未追跡ファイルが大きすぎて照合できません'));
     const data=st.isSymbolicLink()?Buffer.from(fs.readlinkSync(file)):fs.readFileSync(file);
     digest.update(JSON.stringify([f,st.mode,data.length])).update(data);
   }
@@ -233,10 +235,10 @@ function inspect(dir) {
 }
 function cleanupCopy({ dir, workRoot, target, expectedSnapshot, beforeMove = () => {} }) {
   const wt = repoTop(dir), rel = wt && path.relative(workRoot, wt);
-  if (!wt || !rel || rel.startsWith('..') || path.isAbsolute(rel) || !mainOf(wt)) throw Error('片付ける作業用コピーの場所が不正です');
+  if (!wt || !rel || rel.startsWith('..') || path.isAbsolute(rel) || !mainOf(wt)) throw Error(lt('片付ける作業用コピーの場所が不正です'));
   const branch = git(wt, ['rev-parse', '--abbrev-ref', 'HEAD']);
-  if (!isAncestor(target, git(wt, ['rev-parse', 'HEAD'])) || tryGit(wt, ['diff', '--quiet', 'HEAD']) === null) throw Error('未統合の変更があるため作業用コピーを残します');
-  if (expectedSnapshot ? JSON.stringify(inspect(wt)) !== JSON.stringify(expectedSnapshot) : Boolean(git(wt,['ls-files','--others','--exclude-standard','-z']))) throw Error('片付け前に未統合のファイルが変わりました。作業用コピーを残します');
+  if (!isAncestor(target, git(wt, ['rev-parse', 'HEAD'])) || tryGit(wt, ['diff', '--quiet', 'HEAD']) === null) throw Error(lt('未統合の変更があるため作業用コピーを残します'));
+  if (expectedSnapshot ? JSON.stringify(inspect(wt)) !== JSON.stringify(expectedSnapshot) : Boolean(git(wt,['ls-files','--others','--exclude-standard','-z']))) throw Error(lt('片付け前に未統合のファイルが変わりました。作業用コピーを残します'));
   const sourceHead = git(wt, ['rev-parse', 'HEAD']), trashed = trashPath(wt);
   beforeMove({trashed, branch, sourceHead});
   fs.renameSync(wt, trashed);
@@ -244,10 +246,10 @@ function cleanupCopy({ dir, workRoot, target, expectedSnapshot, beforeMove = () 
   return { trashed, branch };
 }
 function finishCleanupCopy({ target, branch, sourceHead }) {
-  if (!isAncestor(target, sourceHead)) throw Error('統合済みのコミットを確認できません');
+  if (!isAncestor(target, sourceHead)) throw Error(lt('統合済みのコミットを確認できません'));
   git(target, ['worktree', 'prune']);
   const head = tryGit(target, ['rev-parse', '--verify', 'refs/heads/' + branch]);
-  if (head && head !== sourceHead) throw Error('片付け途中でブランチが変わりました。登録は残します');
+  if (head && head !== sourceHead) throw Error(lt('片付け途中でブランチが変わりました。登録は残します'));
   if (head) git(target, ['branch', '-D', branch]);
 }
 

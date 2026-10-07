@@ -1,31 +1,35 @@
 'use strict';
+// Japanese remains the default when this module is loaded on its own.
+var UI = globalThis.HubI18n || { text: value => value, html: value => value, label: value => value, message: value => value, valueAttribute: () => '', dateLocale: 'ja-JP',
+  template: (strings, ...values) => strings.reduce((out, part, i) => out + part + (i < values.length ? values[i] : ''), '') };
+
 // 全画面共通の利用枠表示。作業画面の再描画や入力には触れない。
 let usageData = null, usageLoading = false, usageError = '', usageClearing = false, usageClearError = '', usageVersion = 0;
 const usageCompactMedia = typeof matchMedia === 'function' ? matchMedia('(max-width: 900px)') : null;
 function usageDate(value) {
-  if (!value || !Number.isFinite(Date.parse(value))) return '未提供';
-  return new Date(value).toLocaleString('ja-JP', { month:'numeric', day:'numeric', weekday:'short', hour:'2-digit', minute:'2-digit', timeZoneName:'short' });
+  if (!value || !Number.isFinite(Date.parse(value))) return UI.text('未提供');
+  return new Date(value).toLocaleString(UI.dateLocale, { month:'numeric', day:'numeric', weekday:'short', hour:'2-digit', minute:'2-digit', timeZoneName:'short' });
 }
 function usageRemaining(value, now = Date.now()) {
-  if (!value || !Number.isFinite(Date.parse(value))) return 'リセット日時は未提供';
+  if (!value || !Number.isFinite(Date.parse(value))) return UI.text('リセット日時は未提供');
   const mins = Math.ceil((Date.parse(value) - now) / 60000);
-  if (mins <= 0) return '予定時刻を過ぎました（再確認待ち）';
+  if (mins <= 0) return UI.text('予定時刻を過ぎました（再確認待ち）');
   const d = Math.floor(mins / 1440), h = Math.floor(mins % 1440 / 60), m = mins % 60;
-  return `あと${d ? d + '日' : ''}${h ? h + '時間' : ''}${m || !d && !h ? m + '分' : ''}`;
+  return UI.template`あと${d ? d + UI.text('日') : ''}${h ? h + UI.text('時間') : ''}${m || !d && !h ? m + UI.text('分') : ''}`;
 }
 function usageSummary(ai, provider, now = Date.now(), compact = false) {
   const name = ai === 'codex' ? (compact ? 'CX' : 'Codex') : (compact ? 'CC' : 'Claude');
-  if (!provider || provider.status !== 'ok') return `${name} 未取得`;
-  if (Date.parse(provider.fetchedAt) + 6 * 60000 < now) return `${name} 前回の情報`;
+  if (!provider || provider.status !== 'ok') return UI.template`${name} 未取得`;
+  if (Date.parse(provider.fetchedAt) + 6 * 60000 < now) return UI.template`${name} 前回の情報`;
   const windows = provider.windows.filter(w => !w.id.startsWith('model:')).slice(0,2);
   return name + ' ' + windows.map(w => {
-    if (!compact && w.resetsAt && Date.parse(w.resetsAt) <= now) return `${w.label} 再確認待ち`;
+    if (!compact && w.resetsAt && Date.parse(w.resetsAt) <= now) return UI.template`${UI.label(w.label)} 再確認待ち`;
     let label = w.label.replace(/枠$/, '');
     if (compact) label = label.replace(/^週間$/, 'W').replace(/^(\d+)時間$/, '$1hr');
     if (compact && ai === 'codex' && windows.length === 1 && label === 'W') label = '';
-    const value = w.resetsAt && Date.parse(w.resetsAt) <= now ? '再確認待ち' : w.usedPercent === null ? '未提供' : Math.round(w.usedPercent) + '%';
-    return `${label ? label + ' ' : ''}${value}`;
-  }).join(compact ? ' ' : '・');
+    const value = w.resetsAt && Date.parse(w.resetsAt) <= now ? UI.text('再確認待ち') : w.usedPercent === null ? UI.text('未提供') : Math.round(w.usedPercent) + '%';
+    return `${label ? UI.label(label) + ' ' : ''}${value}`;
+  }).join(compact ? ' ' : UI.text('・'));
 }
 // 名前は文字で残し、識別用の図形は読み上げ・フォーカスの対象外にする。
 function usageIcon(ai) {
@@ -36,17 +40,17 @@ function usageIcon(ai) {
 function usageHtml(data, now = Date.now()) {
   const state = data?.fableLimit;
   const held = state?.hold && (state.until === null || Date.parse(state.until) > now);
-  const limitNote = held ? `<p class="note">Fable 5.1 上限中・${state.until === null ? '解除日時不明・手動で解除するまで Astra' : esc(usageDate(state.until)) + 'まで（自動で Astra へ）'} <button id="usage-fable-clear" type="button"${usageClearing ? ' disabled' : ''}>Fableに戻す</button></p>` : '';
+  const limitNote = held ? UI.template`<p class="note">Fable 5.1 上限中・${state.until === null ? UI.text('解除日時不明・手動で解除するまで Astra') : esc(usageDate(state.until)) + UI.text('まで（自動で Astra へ）')} <button id="usage-fable-clear" type="button"${usageClearing ? ' disabled' : ''}>Fableに戻す</button></p>` : '';
   return limitNote + ['codex','claude'].map(ai => {
     const p = data?.providers?.[ai];
     const name = ai === 'codex' ? 'Codex' : 'Claude';
-    if (!p || p.status !== 'ok') return `<section class="card usage-card"><h3>${usageIcon(ai)}${name}</h3><p>未取得</p><p class="note">${esc(p?.message || '確認中…')}</p>${p?.attemptedAt ? `<p class="small">確認を試みた時刻：${esc(usageDate(p.attemptedAt))}</p>` : ''}</section>`;
+    if (!p || p.status !== 'ok') return UI.template`<section class="card usage-card"><h3>${usageIcon(ai)}${name}</h3><p>未取得</p><p class="note">${esc(UI.message(p?.message || UI.text('確認中…')))}</p>${p?.attemptedAt ? UI.template`<p class="small">確認を試みた時刻：${esc(usageDate(p.attemptedAt))}</p>` : ''}</section>`;
     const old = Date.parse(p.fetchedAt) + 6 * 60000 < now;
-    return `<section class="card usage-card"><h3>${usageIcon(ai)}${name}</h3>${old ? '<p class="note">前回取得した情報です。現在の状況を確認してください。</p>' : ''}${p.windows.map(w => {
+    return UI.template`<section class="card usage-card"><h3>${usageIcon(ai)}${name}</h3>${old ? UI.html('<p class="note">前回取得した情報です。現在の状況を確認してください。</p>') : ''}${p.windows.map(w => {
       const expired = w.resetsAt && Date.parse(w.resetsAt) <= now;
-      const pct = w.usedPercent === null ? '未提供' : `${Math.round(w.usedPercent)}%`;
-      const bar = w.usedPercent === null ? '' : `<progress class="usage-progress" max="100" value="${Math.min(100,Math.max(0,w.usedPercent))}" aria-label="${esc(name + ' ' + w.label + ' 使用率')}" aria-valuetext="${esc(pct)}"></progress>`;
-      return `<div class="usage-window${expired ? ' usage-expired' : ''}"><div class="row"><b>${esc(w.label)}</b><span class="usage-pct">${expired ? '前回の使用' : '使用'} ${esc(pct)}</span></div>${bar}<div class="small">リセット：${esc(usageDate(w.resetsAt))}<br>${esc(usageRemaining(w.resetsAt,now))}</div></div>`;
+      const pct = w.usedPercent === null ? UI.text('未提供') : `${Math.round(w.usedPercent)}%`;
+      const bar = w.usedPercent === null ? '' : `<progress class="usage-progress" max="100" value="${Math.min(100,Math.max(0,w.usedPercent))}" aria-label="${esc(name + ' ' + UI.label(w.label) + UI.text(' 使用率'))}" aria-valuetext="${esc(pct)}"></progress>`;
+      return UI.template`<div class="usage-window${expired ? ' usage-expired' : ''}"><div class="row"><b>${esc(UI.label(w.label))}</b><span class="usage-pct">${expired ? UI.text('前回の使用') : UI.text('使用')} ${esc(pct)}</span></div>${bar}<div class="small">リセット：${esc(usageDate(w.resetsAt))}<br>${esc(usageRemaining(w.resetsAt,now))}</div></div>`;
     }).join('')}<p class="small">取得：${esc(usageDate(p.fetchedAt))}</p></section>`;
   }).join('');
 }
@@ -57,19 +61,19 @@ function drawUsageControls() {
   const wait = usageRefreshWait();
   $('#usage-refresh').disabled = usageLoading || wait > 0;
   $('#usage-status').setAttribute('aria-live',wait > 0 && !usageLoading && !usageError && !usageClearError ? 'off' : 'polite');
-  $('#usage-status').textContent = usageClearError || (usageLoading ? '確認中…' : usageError || (wait > 0 ? `${wait}秒後に再確認できます` : ''));
+  $('#usage-status').textContent = usageClearError || (usageLoading ? UI.text('確認中…') : usageError || (wait > 0 ? UI.template`${wait}秒後に再確認できます` : ''));
 }
 function drawUsage() {
   const drawer = $('#usage-drawer'), savedTop = drawer.scrollTop;
   const b = $('#usage-toggle'); if (!b) return;
   const now = Date.now();
-  const summary = compact => usageError ? '利用状況 未取得' : usageData ? ['codex','claude'].map(ai => usageSummary(ai,usageData.providers[ai],now,compact)).join(' / ') : '利用状況';
+  const summary = compact => usageError ? UI.text('利用状況 未取得') : usageData ? ['codex','claude'].map(ai => usageSummary(ai,usageData.providers[ai],now,compact)).join(' / ') : UI.text('利用状況');
   const full = summary(false);
   b.textContent = summary(usageCompactMedia?.matches);
-  b.setAttribute('aria-label', full + '。利用枠の使用率とリセット時期を見る');
-  b.setAttribute('title', full + '。利用枠の使用率とリセット時期を見る');
+  b.setAttribute('aria-label', full + UI.text('。利用枠の使用率とリセット時期を見る'));
+  b.setAttribute('title', full + UI.text('。利用枠の使用率とリセット時期を見る'));
   drawUsageControls();
-  $('#usage-body').innerHTML = usageError ? '<p class="note">Hubに接続できませんでした。現在の利用状況は未取得です。</p>' : usageHtml(usageData);
+  $('#usage-body').innerHTML = usageError ? UI.html('<p class="note">Hubに接続できませんでした。現在の利用状況は未取得です。</p>') : usageHtml(usageData);
   $('#usage-fable-clear')?.addEventListener('click',clearFableLimit);
   drawer.scrollTop = savedTop;
 }
@@ -82,17 +86,17 @@ async function loadUsage(force = false) {
     const loaded = await api(force ? '/api/usage/refresh' : '/api/usage', force ? {} : undefined, {'X-Hub':'1'});
     if (version === usageVersion) usageData = loaded;
     if (version === usageVersion) usageError = '';
-  } catch { if (version === usageVersion) usageError = '利用状況を取得できませんでした'; }
+  } catch { if (version === usageVersion) usageError = UI.text('利用状況を取得できませんでした'); }
   finally { usageLoading = false; drawUsage(); }
 }
 async function clearFableLimit() {
-  if (usageClearing || !confirm('上限の保持を解除してFableに戻しますか？ 次の依頼で正式上限なら再びAstraへ切り替わります。')) return;
+  if (usageClearing || !confirm(UI.text('上限の保持を解除してFableに戻しますか？ 次の依頼で正式上限なら再びAstraへ切り替わります。'))) return;
   usageClearing = true; usageClearError = ''; drawUsage();
   try {
     const cleared = await api('/api/limits/fable/clear', {}, {'X-Hub':'1'});
     usageVersion++; usageData = cleared;
     usageError = '';
-  } catch { usageClearError = '解除を保存できませんでした'; }
+  } catch { usageClearError = UI.text('解除を保存できませんでした'); }
   finally { usageClearing = false; drawUsage(); }
 }
 function closeUsage() {

@@ -1,4 +1,5 @@
 'use strict';
+const { lt } = require("./locale");
 // Claude Code / Codex の起動コマンドを組み立てる。フォルダを Finder で開く。
 const { execFile } = require('child_process');
 const fs = require('fs');
@@ -22,8 +23,8 @@ function agyAccountError(home = process.env.HUB_AI_HOME || os.homedir()) {
 function agyAccountErrorNow(file) {
   try {
     const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (settings.modelProvider && settings.modelProvider !== 'antigravity') return 'Agy が API の利用設定になっています。契約・無料枠のログイン経路を確認してください（Hub は認証を変更しません）';
-  } catch (e) { if (e.code !== 'ENOENT') return 'Agy の設定を確認できません。設定ファイルを確認してください'; }
+    if (settings.modelProvider && settings.modelProvider !== 'antigravity') return lt('Agy が API の利用設定になっています。契約・無料枠のログイン経路を確認してください（Hub は認証を変更しません）');
+  } catch (e) { if (e.code !== 'ENOENT') return lt('Agy の設定を確認できません。設定ファイルを確認してください'); }
   return '';
 }
 function childEnv(ai, env) {
@@ -43,7 +44,7 @@ const CODEX_CONTEXT_ARGS = Object.freeze([
   '-c', 'model_auto_compact_token_limit=160000',
   '-c', 'model_auto_compact_token_limit_scope="total"',
 ]);
-const CONTEXT_RULE = '# 長い会話の決まり\n文字数とトークン数は別。160k トークンを目安に作業ファイルと .ai/memory（2000字以内、INDEX.md に1行）へ保存し、180k になる前に圧縮して新しい会話で作業ファイルから再開する。残りが分からない時は区切りごとに保存する。読むのは最新の作業ファイル・要約・必要な箇所だけで、全文の読み直しや長いログの貼り付けはしない。記録は消さない。200k 以内は目安で、厳密には保証できない。';
+const CONTEXT_RULE = lt('# 長い会話の決まり\n文字数とトークン数は別。160k トークンを目安に作業ファイルと .ai/memory（2000字以内、INDEX.md に1行）へ保存し、180k になる前に圧縮して新しい会話で作業ファイルから再開する。残りが分からない時は区切りごとに保存する。読むのは最新の作業ファイル・要約・必要な箇所だけで、全文の読み直しや長いログの貼り付けはしない。記録は消さない。200k 以内は目安で、厳密には保証できない。');
 
 // 画面の呼び名 → CLI に渡す名前
 // ※ 実際の CLI が受け付ける名前と違えば、ここを直すだけでよい
@@ -84,8 +85,8 @@ function flagFor(ai, model) {
 function startupInfo(ai, model, modelFlag = flagFor(ai, model)) {
   const oneLine = s => String(s || '').replace(/[\r\n]+/g, ' ');
   const label = ai === 'agy' && modelFlag === AGY_MODEL.id ? AGY_MODEL.label : modelLabel(ai, model);
-  const setting = modelFlag ? `${oneLine(label)}（CLI 引数 --model ${oneLine(modelFlag)}）` : 'モデル指定なし（CLI の既定）';
-  return `【この番の起動】Hub がこの番の起動に指定した設定は ${AI_LABEL[ai] || oneLine(ai)}・${setting}。これは起動設定で、実際に応答したモデルの証明ではない。あなた自身にはモデルを確かめる方法がない。起動設定が依頼の指定と一致している場合は、自分で証明できないことだけを理由に停止しない。モデル名を聞かれたら「起動設定：${setting}。自分では確かめられない」と答える。`;
+  const setting = modelFlag ? lt`${oneLine(label)}（CLI 引数 --model ${oneLine(modelFlag)}）` : lt('モデル指定なし（CLI の既定）');
+  return lt`【この番の起動】Hub がこの番の起動に指定した設定は ${AI_LABEL[ai] || oneLine(ai)}・${setting}。これは起動設定で、実際に応答したモデルの証明ではない。あなた自身にはモデルを確かめる方法がない。起動設定が依頼の指定と一致している場合は、自分で証明できないことだけを理由に停止しない。モデル名を聞かれたら「起動設定：${setting}。自分では確かめられない」と答える。`;
 }
 const EFFORT_FLAG = {
   claude: { '中': 'medium', '高': 'high', '極高': 'xhigh', 'MAX': 'max', 'Ultra': 'ultra' },
@@ -128,7 +129,7 @@ function buildCommand({ ai, dir, prompt, cmd, model, effort }) {
 // 画面の中の作業画面用：実行ファイルと引数に分ける（シェルを通さない）
 function buildArgv({ ai, prompt, cmd, model, effort }) {
   if (ai === 'agy') {
-    if (model && !flagFor(ai, model)) throw new Error('Agy で承認されているモデルは Gemini 3.1 Pro (High) だけです');
+    if (model && !flagFor(ai, model)) throw new Error(lt('Agy で承認されているモデルは Gemini 3.1 Pro (High) だけです'));
     return { command: 'agy', args: ['--dangerously-skip-permissions', '--model', AGY_MODEL.id, ...(prompt ? [`--prompt-interactive=${prompt}`] : [])] };
   }
   const base = (cmd || DEFAULT_CMD[ai] || '').trim().split(/\s+/).filter(Boolean);

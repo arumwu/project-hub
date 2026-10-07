@@ -1,4 +1,5 @@
 'use strict';
+const { lt } = require("./locale");
 // 画面の中の作業画面：作業ごとに Claude Code / Codex を動かし、画面とつなぐ
 // node-pty が無い時（準備前）は、その旨を返して落ちないようにする
 const os = require('os');
@@ -62,20 +63,20 @@ class Sessions {
 
   // 作業画面を開く。すでに動いていればそれを返す
   start({ project, task, ai, dir, command, args, env, cols, rows }) {
-    if (!pty) throw new Error('作業画面の部品（node-pty）が入っていません。setup.sh を実行してください');
+    if (!pty) throw new Error(lt('作業画面の部品（node-pty）が入っていません。setup.sh を実行してください'));
     const k = this.key(project, task, ai);
     const cur = this.map.get(k);
     if (cur && !cur.exited) return cur;
     if (ai === 'agy') { const error = agyAccountError(); if (error) throw new Error(error); }
     const fullEnv = childEnv(ai, { ...process.env, ...env, TERM: 'xterm-256color', LANG: process.env.LANG || 'ja_JP.UTF-8', HOME: os.homedir() });
-    if (!dir || !fs.existsSync(dir)) throw new Error(`作業の場所が見つかりません: ${dir}`);
+    if (!dir || !fs.existsSync(dir)) throw new Error(lt`作業の場所が見つかりません: ${dir}`);
     const exe = which(command, fullEnv.PATH);
-    if (!exe) throw new Error(`「${command}」が見つかりません。ターミナルで ${command} が動くか確かめてください`);
+    if (!exe) throw new Error(lt`「${command}」が見つかりません。ターミナルで ${command} が動くか確かめてください`);
     let proc;
     try {
       proc = pty.spawn(exe, args, { name: 'xterm-256color', cols: cols || 100, rows: rows || 30, cwd: dir, env: fullEnv });
     } catch (e) {
-      throw new Error(`作業画面を開けませんでした（${e.message}）`);
+      throw new Error(lt`作業画面を開けませんでした（${e.message}）`);
     }
     const s = { proc, buf: '', watchers: new Set(), ai, dir, started: Date.now(), lastOut: Date.now(), exited: false, code: null };
     proc.onData(d => {

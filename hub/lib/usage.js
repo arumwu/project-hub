@@ -1,4 +1,5 @@
 'use strict';
+const { lt } = require("./locale");
 // 契約CLIの状態だけを読む。user prompt / thread / turn は送らず、秘密・生出力は公開しない。
 const { spawn } = require('node:child_process');
 const os = require('node:os');
@@ -15,11 +16,11 @@ function resetTime(value) {
   return Number.isFinite(ms) && ms > 0 && ms < 4102444800000 ? new Date(ms).toISOString() : null;
 }
 function windowLabel(mins) {
-  if (mins === 10080) return '週間枠';
-  if (typeof mins !== 'number' || !Number.isFinite(mins) || mins <= 0) return '利用枠';
-  if (mins % 1440 === 0) return `${mins / 1440}日枠`;
-  if (mins % 60 === 0) return `${mins / 60}時間枠`;
-  return `${mins}分枠`;
+  if (mins === 10080) return lt('週間枠');
+  if (typeof mins !== 'number' || !Number.isFinite(mins) || mins <= 0) return lt('利用枠');
+  if (mins % 1440 === 0) return lt`${mins / 1440}日枠`;
+  if (mins % 60 === 0) return lt`${mins / 60}時間枠`;
+  return lt`${mins}分枠`;
 }
 const label = (v, fallback) => typeof v === 'string' && v.trim() ? v.trim().slice(0, 80) : fallback;
 function row(id, name, pct, reset) {
@@ -46,11 +47,11 @@ function claudeWindows(data) {
   const limits = data.rate_limits;
   if (!limits || typeof limits !== 'object') throw error('unavailable');
   const windows = [];
-  for (const [key, name] of [['five_hour','5時間枠'], ['seven_day','週間枠'], ['seven_day_oauth_apps','週間枠（OAuthアプリ）'], ['seven_day_opus','Opus・週間枠'], ['seven_day_sonnet','Sonnet・週間枠']]) {
+  for (const [key, name] of [['five_hour',lt('5時間枠')], ['seven_day',lt('週間枠')], ['seven_day_oauth_apps',lt('週間枠（OAuthアプリ）')], ['seven_day_opus',lt('Opus・週間枠')], ['seven_day_sonnet',lt('Sonnet・週間枠')]]) {
     const w = limits[key]; if (w && typeof w === 'object') windows.push(row(key, name, w.utilization, w.resets_at));
   }
   if (Array.isArray(limits.model_scoped)) for (const [i, w] of limits.model_scoped.slice(0,20).entries()) {
-    if (w && typeof w === 'object') windows.push(row(`model:${i}`, `${label(w.display_name,'モデル別')}・週間枠`, w.utilization, w.resets_at));
+    if (w && typeof w === 'object') windows.push(row(`model:${i}`, lt`${label(w.display_name,lt('モデル別'))}・週間枠`, w.utilization, w.resets_at));
   }
   return windows;
 }
@@ -124,10 +125,10 @@ function readCli(ai, file, options = {}) {
   });
 }
 const messages = {
-  missing:'CLIが見つかりません', start:'CLIを起動できませんでした', timeout:'CLIの応答が時間切れになりました',
-  subscription:'契約アカウントの利用枠を取得できません', unavailable:'利用枠の情報が提供されていません',
-  format:'CLIの利用情報を読み取れませんでした', unsupported:'このCLIでは利用情報を取得できません',
-  response:'CLIから利用情報を取得できませんでした', dry:'テスト中のため取得していません',
+  missing:lt('CLIが見つかりません'), start:lt('CLIを起動できませんでした'), timeout:lt('CLIの応答が時間切れになりました'),
+  subscription:lt('契約アカウントの利用枠を取得できません'), unavailable:lt('利用枠の情報が提供されていません'),
+  format:lt('CLIの利用情報を読み取れませんでした'), unsupported:lt('このCLIでは利用情報を取得できません'),
+  response:lt('CLIから利用情報を取得できませんでした'), dry:lt('テスト中のため取得していません'),
 };
 class Usage {
   constructor(options = {}) {

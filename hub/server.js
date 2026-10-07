@@ -1,4 +1,5 @@
 'use strict';
+const { lt, locale, config: localeConfig, configScript, label: displayLabel } = require('./lib/locale');
 // Project Hub 第2版：台帳の一覧、画面の中の作業画面、役割・モデル・思考の設定
 // 使い方: node server.js  →  http://127.0.0.1:4545
 const http = require('http');
@@ -60,16 +61,17 @@ const chats = new chat.ChatRunner({ dirOf: id => { const p = store.readProject(i
   onFableSuccess: started => limitEvidence.success(started),
   refreshQueued: o => {
     const p = store.readProject(o.project), t = p?.tasks.find(t => t.id === o.task);
-    if (!p || !t) throw Error('作業が見つかりません');
+    if (!p || !t) throw Error(lt('作業が見つかりません'));
     const dir = o.dir && fs.existsSync(o.dir) ? o.dir : workDir(p, t).dir;
-    if (!dir || !fs.existsSync(dir)) throw Error('作業場所を用意できませんでした');
-    return { dir, policy: modelPolicy(p, t), basePrompt: taskPrompt(p, t, store.taskFile(p.id, t.id), dir) + ' ここは会話画面。人からの依頼に答え、区切りで作業ファイルを更新すること。' };
+    if (!dir || !fs.existsSync(dir)) throw Error(lt('作業場所を用意できませんでした'));
+    return { dir, policy: modelPolicy(p, t), basePrompt: taskPrompt(p, t, store.taskFile(p.id, t.id), dir) + lt(' ここは会話画面。人からの依頼に答え、区切りで作業ファイルを更新すること。') };
   },
   canStart: (ai, model, o) => {
-    if (aiTools.isOperating()) return 'AI の更新・モデル再取得が進行中です';
+    if (appUpdate.applying()) return appUpdate.busyMessage();
+    if (aiTools.isOperating()) return lt('AI の更新・モデル再取得が進行中です');
     const invalid=modelError(ai,model); if(invalid)return invalid;
     if(o) { const p=store.readProject(o.project), t=p?.tasks.find(t=>t.id===o.task);
-      if(!p || !t)return '作業が見つかりません';
+      if(!p || !t)return lt('作業が見つかりません');
       if(o.requireModel && t.state === '完了')return DELEGATE_COMPLETED_ERROR;
       if(o.requireModel) {const blocked=delegateTerminalError(p.id,t.id);if(blocked)return blocked;}
       try {assertWorkspaceIdle(p,t,false);} catch(e) {return e.message;}
@@ -113,7 +115,7 @@ const readVersion = () => {
 const VERSION = readVersion();
 function changelog(n) {
   let text = '';
-  try { text = fs.readFileSync(path.join(__dirname, 'CHANGELOG.md'), 'utf8'); } catch (e) { return []; }
+  try { text = fs.readFileSync(path.join(__dirname, locale() === 'zh-TW' ? 'CHANGELOG.zh-TW.md' : 'CHANGELOG.md'), 'utf8'); } catch (e) { return []; }
   const out = [];
   for (const part of text.split(/^## /m).slice(1)) {
     const [head, ...rest] = part.split('\n');
@@ -218,7 +220,7 @@ function delegateTerminalError(project, task) {
   const terminals = sessions.list().filter(s => s.project === project && s.task === task && s.running);
   if (!terminals.length) return '';
   const names = [...new Set(terminals.map(s => launch.AI_LABEL[s.ai] || s.ai))].join('・');
-  return `この作業のターミナルで AI（${names}）が動いているため、委任できません。人に「この作業の作業画面で［ターミナル］に切り替え、${names}の欄の［停止］を押してから、会話でもう一度頼んでください」と案内してください。会話画面の［停止］は押させない（待っている指示も取り消されます）。裏で別の CLI を起動したり、この依頼を繰り返し送ったりしないでください。`;
+  return lt`この作業のターミナルで AI（${names}）が動いているため、委任できません。人に「この作業の作業画面で［ターミナル］に切り替え、${names}の欄の［停止］を押してから、会話でもう一度頼んでください」と案内してください。会話画面の［停止］は押させない（待っている指示も取り消されます）。裏で別の CLI を起動したり、この依頼を繰り返し送ったりしないでください。`;
 }
 
 // 人が承認した例外は司令塔・チェックの Fable → Astra だけ。別の予備担当には広げない。
@@ -232,7 +234,7 @@ function fableBackup(data, role) {
 }
 // ChatGPT アプリ・Codex の設定ファイル（~/.codex/config.toml）に、Hub の MCP が登録されているか
 const CODEX_CONFIG = () => path.join(process.env.HUB_AI_HOME || os.homedir(), '.codex', 'config.toml');
-const MCP_BLOCK = () => `\n# Project Hub の道具（作業を読む・結果を書き戻す）。Hub を起動しておくこと\n[mcp_servers.project-hub]\ncommand = "node"\nargs = ["${path.join(__dirname, 'mcp.js')}"]\n`;
+const MCP_BLOCK = () => lt`\n# Project Hub の道具（作業を読む・結果を書き戻す）。Hub を起動しておくこと\n[mcp_servers.project-hub]\ncommand = "node"\nargs = ["${path.join(__dirname, 'mcp.js')}"]\n`;
 function codexMcpStatus() {
   let text = '';
   try { text = fs.readFileSync(CODEX_CONFIG(), 'utf8'); } catch (e) { return { registered: false, configFile: CODEX_CONFIG(), configExists: false }; }
@@ -241,13 +243,13 @@ function codexMcpStatus() {
 function codexMcpRegister() {
   const file = CODEX_CONFIG();
   let text = '';
-  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') return { error: `設定ファイルを読めません：${file}` }; }
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') return { error: lt`設定ファイルを読めません：${file}` }; }
   if (/^\s*\[mcp_servers\.project-hub\]/m.test(text)) return { file, added: false };
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     if (text) fs.copyFileSync(file, `${file}.bak-${new Date().toISOString().slice(0, 10)}`); // 念のため前の内容を残す
     fs.writeFileSync(file, text.replace(/\s*$/, '') + (text ? '\n' : '') + MCP_BLOCK());
-  } catch (e) { return { error: `設定ファイルに書けません：${e.message}` }; }
+  } catch (e) { return { error: lt`設定ファイルに書けません：${e.message}` }; }
   return { file, added: true };
 }
 // 表示・非表示と順番を同じ設定へ、互いを保って保存する。
@@ -283,10 +285,18 @@ sessions.onExit = (project, task, ai, s) => { if (!s?.stopped && !(s?.watchers.s
 const handoff = require('./lib/handoff');
 function reportChild(child, kind, text) {
   try { return handoff.reportToParent(store, child, { kind, text }, { record, unread: chatEnded, emitRow: (project, task, row) => chats.emit(project, task, { type: 'row', row }) }); }
-  catch (e) { console.log(`[親への報告] ${e.message}`); return false; }
+  catch (e) { console.log(lt`[親への報告] ${e.message}`); return false; }
 }
 // 裏で動いている AI（チャットの AI が nohup などで起動した codex / claude / agy）。終わったら、その作業を未読にする
 const procwatch = require('./lib/procwatch').create({ projects: () => store.listProjects(), baseOf });
+
+const updateBusy = () => aiTools.isOperating() || sessions.list().some(x => x.running) || chats.running.size > 0 || procwatch.list().length > 0 ||
+  store.listProjects().some(p => maintenance.locked(p.id) || github.locked(baseOf(p)) || p.tasks.some(t => chats.queue(p.id, t.id).length > 0));
+const automation = process.env.HUB_AUTO_TRANSLATE === '1' && process.env.HUB_TRANSLATION_FORK
+  ? require('./lib/app-update-workflow').createAutomation({ root: ROOT, env: process.env }) : {};
+const appUpdate = new (require('./lib/app-update').AppUpdate)({ root: ROOT, source: process.env.HUB_UPDATE_SOURCE || path.join(__dirname, '..'),
+  appPath: process.env.HUB_UPDATE_APP || '', env: process.env, dry: DRY, busy: updateBusy, ...automation });
+
 procwatch.onChange((list, { removed }) => {
   for (const x of removed) {
     if (!x.project) continue;
@@ -311,7 +321,7 @@ const github = require('./lib/github').createGithub({ settingsFile: path.join(RO
       const q = all.find(x => x.id === a.project); if (!q || canonical(baseOf(q)) !== base) return false;
       const t = q.tasks.find(x => x.id === a.task);
       return !t || t.workspaceMode === 'direct' || !t.workdir || canonical(expandHome(t.workdir)) === base;
-    })) { const e = Error('同じ本体でAIが作業中です。終わってから作ってください'); e.status = 409; throw e; }
+    })) { const e = Error(lt('同じ本体でAIが作業中です。終わってから作ってください')); e.status = 409; throw e; }
   }
 });
 const githubProject = p => ({ ...p, base: baseOf(p) });
@@ -339,13 +349,13 @@ function modelError(ai, model) {
   if (ai === 'agy') {
     const route = launch.agyAccountError();
     if (route) return route;
-    if (launch.flagFor(ai, model) !== launch.AGY_MODEL.id) return 'Agy で承認されているモデルは Gemini 3.1 Pro (High) だけです';
-    if (!aiTools.catalog().agy.models.some(x => x.id === launch.AGY_MODEL.id)) return '設定画面で Agy のモデル一覧を再取得してください。別のモデルへは切り替えません';
+    if (launch.flagFor(ai, model) !== launch.AGY_MODEL.id) return lt('Agy で承認されているモデルは Gemini 3.1 Pro (High) だけです');
+    if (!aiTools.catalog().agy.models.some(x => x.id === launch.AGY_MODEL.id)) return lt('設定画面で Agy のモデル一覧を再取得してください。別のモデルへは切り替えません');
   }
   if (!model) return '';
-  if (aiTools.staleModel(ai, model)) return `モデル「${model}」は現在の候補から外れています。新しいモデルを選んでください`;
+  if (aiTools.staleModel(ai, model)) return lt`モデル「${model}」は現在の候補から外れています。新しいモデルを選んでください`;
   if (Object.prototype.hasOwnProperty.call(launch.getOverrides()[ai] || {}, model)) return '';
-  return launch.flagFor(ai, model) ? '' : `モデル「${model}」の CLI 名が分かりません。設定で直してください`;
+  return launch.flagFor(ai, model) ? '' : lt`モデル「${model}」の CLI 名が分かりません。設定で直してください`;
 }
 
 // 作業する場所：作業ファイルの workdir → なければ用意する（Git なら作業用コピー、無ければ保存を始めて本体）
@@ -356,7 +366,8 @@ function baseOf(p) {
   return d && fs.existsSync(d) ? d : p.dir;
 }
 function assertWorkspaceIdle(p, t, permitChat, githubOperation = false) {
-  if (maintenance.locked(p.id)) {const e=Error('同じ本体で検証中です。終わってからAIを始めてください');e.status=409;throw e;}
+  if (appUpdate.applying()) { const error = Error(appUpdate.busyMessage()); error.status = 409; throw error; }
+  if (maintenance.locked(p.id)) {const e=Error(lt('同じ本体で検証中です。終わってからAIを始めてください'));e.status=409;throw e;}
   if (!githubOperation) github.assertStart(githubProject(p), { ...t, workdir: expandHome(t.workdir) });
   const canonical = dir => { try { return fs.realpathSync(dir); } catch(e) { return path.resolve(dir); } };
   const base = canonical(baseOf(p));
@@ -368,7 +379,7 @@ function assertWorkspaceIdle(p, t, permitChat, githubOperation = false) {
     if (permitChat && a.chat && a.project===p.id && a.task===t.id) continue;
     const q=all.find(x=>x.id===a.project), at=q?.tasks.find(x=>x.id===a.task); if(!q || !at)continue;
     if(canonical(baseOf(q))===base && (targetDirect || at.workspaceMode==='direct')) {
-      const e=Error('同じ本体でAIが作業中です。本体での同時作業はできません');e.status=409;throw e;
+      const e=Error(lt('同じ本体でAIが作業中です。本体での同時作業はできません'));e.status=409;throw e;
     }
   }
 }
@@ -382,7 +393,7 @@ function workDir(p, t) {
     if (r.worktree) store.updateTask(p.id, t.id, { workdir: r.dir });
     return r;
   } catch (e) {
-    return { dir: base, note: `作業用コピーを作れなかったため、本体で作業します（${String(e.message || e).split('\n')[0]}）` };
+    return { dir: base, note: lt`作業用コピーを作れなかったため、本体で作業します（${String(e.message || e).split('\n')[0]}）` };
   }
 }
 function startDir(p,t,permitChat=false) {
@@ -419,13 +430,13 @@ function tailscaleUrl() {
   return tryAt(0).then(u => { tsCache = { at: Date.now(), url: u }; return u; });
 }
 // 別の AI に作業を渡す時の決まり（AI が裏で codex/claude を起動すると Hub に見えず、画面では終わったことになるため）
-const CHAT_DELEGATE_NOTE = 'この委任APIは会話画面からだけ使えます。委任が「この作業のターミナルで AI が動いています」と断られた時だけ、人に次のように頼む：「この作業の作業画面で［ターミナル］に切り替え、動いている AI の欄の［停止］を押してから、もう一度この会話で頼んでください」。断られていない時は、ターミナルの停止や終了を人に頼まない。裏で別のCLIを起動したり、この依頼を繰り返し送ったりしないでください。';
-const TERMINAL_LIMIT_NOTE = 'ターミナルでは自動の引き継ぎは無い。上限で止まったら、渡す内容を作業ファイルに書いて返事を終える。人が［会話］から依頼を送った番で Fable の正式な上限が確認された時は、上の決まりで引き継がれる。';
-const TERMINAL_HANDOFF_NOTE = 'あなたはターミナルで動いている。ここからは別の AI に委任できない。渡したい時は、渡す内容と指定モデルを作業ファイルに書いて返事を終える。人には「この作業の作業画面で［会話］に切り替えて、記録した依頼を送ってください」とだけ案内する。ターミナルを止める操作は頼まない（会話から送った依頼が断られた時に、会話側の AI が案内する）。';
-const DELEGATE_COMPLETED_ERROR = 'この作業は完了済みのため委任できません。続ける場合は、人がこの作業の作業画面の上部の［再開する］を押してから依頼してください。新しい作業は作っていません';
+const CHAT_DELEGATE_NOTE = lt('この委任APIは会話画面からだけ使えます。委任が「この作業のターミナルで AI が動いています」と断られた時だけ、人に次のように頼む：「この作業の作業画面で［ターミナル］に切り替え、動いている AI の欄の［停止］を押してから、もう一度この会話で頼んでください」。断られていない時は、ターミナルの停止や終了を人に頼まない。裏で別のCLIを起動したり、この依頼を繰り返し送ったりしないでください。');
+const TERMINAL_LIMIT_NOTE = lt('ターミナルでは自動の引き継ぎは無い。上限で止まったら、渡す内容を作業ファイルに書いて返事を終える。人が［会話］から依頼を送った番で Fable の正式な上限が確認された時は、上の決まりで引き継がれる。');
+const TERMINAL_HANDOFF_NOTE = lt('あなたはターミナルで動いている。ここからは別の AI に委任できない。渡したい時は、渡す内容と指定モデルを作業ファイルに書いて返事を終える。人には「この作業の作業画面で［会話］に切り替えて、記録した依頼を送ってください」とだけ案内する。ターミナルを止める操作は頼まない（会話から送った依頼が断られた時に、会話側の AI が案内する）。');
+const DELEGATE_COMPLETED_ERROR = lt('この作業は完了済みのため委任できません。続ける場合は、人がこの作業の作業画面の上部の［再開する］を押してから依頼してください。新しい作業は作っていません');
 function delegateRule(p, t) {
-  const ids = p && t ? `"project":"${p.id}","task":"${t.id}"` : '"project":"<プロジェクトID>","task":"<作業ID>"';
-  return `【別の AI に作業を渡す時】自分で codex / claude / agy を裏で起動しない。${CHAT_DELEGATE_NOTE} 会話画面で渡す時は Hub を使う：curl -s -X POST http://127.0.0.1:${PORT}/api/delegate -H 'X-Hub: 1' -H 'Content-Type: application/json' -d '{${ids},"ai":"codex","model":"gpt-6.1-sol","title":"短い名前","text":"頼む内容（必要な背景も）"}'。ai は codex / claude / agy。model は依頼文の中だけでなく、この欄で必ず指定する（チェックは ai: claude・model: claude-fable-5-1、文章・調査・デザインは claude-opus-5-5）。Hub は同じ作業の会話で担当 AI を切り替え、今の AI が動いている間は順番待ちにする。子作業は作らない。画面に順番待ち・作業中と出て、結果もこの会話に残る。相手に「実際のモデルを確かめて違えば止まれ」と書かない。モデルは model 欄で Hub が起動設定として保証する（実際のモデルの証明ではない）。モデル名を返させる時は「起動設定のモデル名」と頼む。上記の自動交代が有効な時は、Fable が上限なら Hub が Astra に引き継ぐので、自分で別のモデルへ委任し直さない。渡したらこの番を終えること。\n【プロジェクトや作業を増やさない】新しいプロジェクト・子プロジェクト・作業ファイル（.ai/tasks）を自分で作らない。分ける必要がある時は、人に提案して決めてもらう。やっていない手順に [x] を付けない。`;
+  const ids = p && t ? `"project":"${p.id}","task":"${t.id}"` : lt('"project":"<プロジェクトID>","task":"<作業ID>"');
+  return lt`【別の AI に作業を渡す時】自分で codex / claude / agy を裏で起動しない。${CHAT_DELEGATE_NOTE} 会話画面で渡す時は Hub を使う：curl -s -X POST http://127.0.0.1:${PORT}/api/delegate -H 'X-Hub: 1' -H 'Content-Type: application/json' -d '{${ids},"ai":"codex","model":"gpt-6.1-sol","title":"短い名前","text":"頼む内容（必要な背景も）"}'。ai は codex / claude / agy。model は依頼文の中だけでなく、この欄で必ず指定する（チェックは ai: claude・model: claude-fable-5-1、文章・調査・デザインは claude-opus-5-5）。Hub は同じ作業の会話で担当 AI を切り替え、今の AI が動いている間は順番待ちにする。子作業は作らない。画面に順番待ち・作業中と出て、結果もこの会話に残る。相手に「実際のモデルを確かめて違えば止まれ」と書かない。モデルは model 欄で Hub が起動設定として保証する（実際のモデルの証明ではない）。モデル名を返させる時は「起動設定のモデル名」と頼む。上記の自動交代が有効な時は、Fable が上限なら Hub が Astra に引き継ぐので、自分で別のモデルへ委任し直さない。渡したらこの番を終えること。\n【プロジェクトや作業を増やさない】新しいプロジェクト・子プロジェクト・作業ファイル（.ai/tasks）を自分で作らない。分ける必要がある時は、人に提案して決めてもらう。やっていない手順に [x] を付けない。`;
 }
 // 人が決めた役割とモデル（roles.yaml）。AI が他のファイル（エージェントの設定など）の古い指定に従わないよう、毎回伝える
 function modelPolicy(p, t, where = 'chat', projects) {
@@ -435,16 +446,16 @@ function modelPolicy(p, t, where = 'chat', projects) {
   const d = rolesData();
   const label = s => (launch.AI_LABEL[s.ai === 'claude-code' ? 'claude' : s.ai] || s.ai);
   const slot = s => { if (!s || s.ai === '人' || !s.model) return ''; const f = launch.flagFor(s.ai === 'claude-code' ? 'claude' : s.ai, s.model); return `${label(s)}・${s.model}${f ? `（${f}）` : ''}`; };
-  const limitPolicy = fableBackup(d) ? '【利用上限の時】司令塔・チェックの Fable 5.1 が利用上限で止まった時だけ、Hub が同じ作業で Codex・GPT-6-Astra に自動で引き継ぐ（人の決まり、会話画面のみ）。上限かどうかは Hub が CLI のエラー構造と正式な上限文で判断し、プロセス終了後に交代する。保持中は解除日時または手動解除までHubがAstraで開始。AIは確認不要。あなたは本文の「上限」という言葉や過去の引用で担当を変えない・止まらない。人の決めた担当モデル（main）は変わらない。引き継ぎで始まった番は、済んだ部分を繰り返さず残りを続ける。' : '【利用上限の時】現在は自動交代がオフ、または司令塔・チェックの Fable から Astra への予備担当が設定されていない。自分で別のモデルへ切り替えない。';
-  const list = d.roles.map(r => slot(r.main) ? `${r.name}＝${slot(r.main)}` : '').filter(Boolean).join('、');
-  return `【モデルの決まり（人が決めた。他のファイルや前の指示より優先）】${list}。人が Agy CLI を手動選択した依頼に限り Gemini 3.1 Pro (High)（gemini-3.1-pro-high）を使ってよい。既定の役割は変更しない。claude-opus-4-6 などの古いモデルは使わない。エージェント（紬・律など）に頼む時も、この決まりのモデルを指定すること。\n${limitPolicy}\n${delegateRule(p, t)}\n\n${guidance(p, t, { where, projects: projects || (t.kind === 'derived' && t.derivedFrom?.includes('/') && !t.derivedFrom.startsWith(p.id + '/') ? store.listProjects() : [p]), copy: inWork(p, t) && !copyMissing(p, t), copyMissing: copyMissing(p, t) })}`;
+  const limitPolicy = fableBackup(d) ? lt('【利用上限の時】司令塔・チェックの Fable 5.1 が利用上限で止まった時だけ、Hub が同じ作業で Codex・GPT-6-Astra に自動で引き継ぐ（人の決まり、会話画面のみ）。上限かどうかは Hub が CLI のエラー構造と正式な上限文で判断し、プロセス終了後に交代する。保持中は解除日時または手動解除までHubがAstraで開始。AIは確認不要。あなたは本文の「上限」という言葉や過去の引用で担当を変えない・止まらない。人の決めた担当モデル（main）は変わらない。引き継ぎで始まった番は、済んだ部分を繰り返さず残りを続ける。') : lt('【利用上限の時】現在は自動交代がオフ、または司令塔・チェックの Fable から Astra への予備担当が設定されていない。自分で別のモデルへ切り替えない。');
+  const list = d.roles.map(r => slot(r.main) ? `${displayLabel(r.name)}＝${slot(r.main)}` : '').filter(Boolean).join('、');
+  return lt`【モデルの決まり（人が決めた。他のファイルや前の指示より優先）】${list}。人が Agy CLI を手動選択した依頼に限り Gemini 3.1 Pro (High)（gemini-3.1-pro-high）を使ってよい。既定の役割は変更しない。claude-opus-4-6 などの古いモデルは使わない。エージェント（紬・律など）に頼む時も、この決まりのモデルを指定すること。\n${limitPolicy}\n${delegateRule(p, t)}\n\n${guidance(p, t, { where, projects: projects || (t.kind === 'derived' && t.derivedFrom?.includes('/') && !t.derivedFrom.startsWith(p.id + '/') ? store.listProjects() : [p]), copy: inWork(p, t) && !copyMissing(p, t), copyMissing: copyMissing(p, t) })}`;
 }
 
 function taskPrompt(p, t, file, dir, where = 'chat', startup) {
-  const issuesRule = `【問題点を短くまとめる決まり】PROJECT.md の issues を足す・変える時は、同じプロジェクトの .ai/issues-summary.json も更新する（他プロジェクトには書かない）。保存形式は {"items":[{"hash":"原文のsha256先頭16文字","title":"30字までの問題名","state":"未解決/確認待ち/判断待ち/解決済み/履歴のいずれか","next":"50字までの次の対応（無ければ空）","who":"人/AI/空のいずれか"}]}。原文は文字列ならそのまま、オブジェクトなら text。hash は Node の require('node:crypto').createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16) で計算する（text は原文そのもの。空白・改行を変えない）。問題名と次の対応に作業ID・commit・テスト件数を入れない。新しい状態の項目を足したら、同じ件の古い項目は「履歴」にする。確かめていない事は「確認待ち」にし、不具合・解決と断定しない。原文は消さない。`;
+  const issuesRule = lt`【問題点を短くまとめる決まり】PROJECT.md の issues を足す・変える時は、同じプロジェクトの .ai/issues-summary.json も更新する（他プロジェクトには書かない）。保存形式は {"items":[{"hash":"原文のsha256先頭16文字","title":"30字までの問題名","state":"未解決/確認待ち/判断待ち/解決済み/履歴のいずれか","next":"50字までの次の対応（無ければ空）","who":"人/AI/空のいずれか"}]}。原文は文字列ならそのまま、オブジェクトなら text。hash は Node の require('node:crypto').createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16) で計算する（text は原文そのもの。空白・改行を変えない）。問題名と次の対応に作業ID・commit・テスト件数を入れない。新しい状態の項目を足したら、同じ件の古い項目は「履歴」にする。確かめていない事は「確認待ち」にし、不具合・解決と断定しない。原文は消さない。`;
   const rel = dir && path.relative(workRoot(p), dir);
-  const copy = rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? `今いるフォルダ（${dir}）はこの作業専用の作業用コピー。ここだけで作業し、本体には触らないこと（取り込みは人が作業画面の［本体に取り込む］で行う）。`
-    : dir ? `今いるフォルダ（${dir}）は本体。この作業は作業用コピーを使わず、ここで作業してよい（Hub が本体で作業すると決めた。作業ルールに「作業用コピーの中だけ」とあっても、この作業では本体に保存してよい。作業用コピーを作るよう人に頼まない）。` : '';
+  const copy = rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? lt`今いるフォルダ（${dir}）はこの作業専用の作業用コピー。ここだけで作業し、本体には触らないこと（取り込みは人が作業画面の［本体に取り込む］で行う）。`
+    : dir ? lt`今いるフォルダ（${dir}）は本体。この作業は作業用コピーを使わず、ここで作業してよい（Hub が本体で作業すると決めた。作業ルールに「作業用コピーの中だけ」とあっても、この作業では本体に保存してよい。作業用コピーを作るよう人に頼まない）。` : '';
   const refs = p.folders.filter(f => /^参考/.test(f.label)).map(f => expandHome(f.path));
   let projects;
   const rels = p.related.map(r => {
@@ -457,14 +468,14 @@ function taskPrompt(p, t, file, dir, where = 'chat', startup) {
   const all = projects ||= store.listProjects(), same = family(p, all);
   const source = sourceOf(p,t.derivedFrom,all);
   const sameRefs = same.filter(q=>q.id!==p.id).map(q=>q.dir);
-  const context = `この作業は${t.kind === 'derived' ? '派生作業' : '本作業'}。${source ? '派生元の作業ファイル: ' + store.taskFile(source.project.id,source.task.id) + '。' : ''}${sameRefs.length ? '同じ大きなプロジェクト内の参照（読むだけ）: '+sameRefs.join(' / ')+'。' : ''}`;
-  const look = refs.length || rels.length ? `参考にしてよい場所（読むだけ。書き換えない）: ${[...refs, ...rels].join(' / ')}。` : '';
+  const context = lt`この作業は${t.kind === 'derived' ? lt('派生作業') : lt('本作業')}。${source ? lt('派生元の作業ファイル: ') + store.taskFile(source.project.id,source.task.id) + '。' : ''}${sameRefs.length ? lt('同じ大きなプロジェクト内の参照（読むだけ）: ')+sameRefs.join(' / ')+'。' : ''}`;
+  const look = refs.length || rels.length ? lt`参考にしてよい場所（読むだけ。書き換えない）: ${[...refs, ...rels].join(' / ')}。` : '';
   if (where !== 'terminal') {
-    const read = `作業「${String(t.title).replace(/[\r\n]+/g, ' ')}」（作業ID ${t.id}）の続きを。読む：台帳/.ai/rules.md・台帳/PROJECT.md・台帳/.ai/tasks/${t.id}.md。区切りで更新、実施した手順だけ[x]（無ければ3〜5個）。workdir・state・questionは書き換えない（Hub管理）。`;
+    const read = lt`作業「${String(t.title).replace(/[\r\n]+/g, ' ')}」（作業ID ${t.id}）の続きを。読む：台帳/.ai/rules.md・台帳/PROJECT.md・台帳/.ai/tasks/${t.id}.md。区切りで更新、実施した手順だけ[x]（無ければ3〜5個）。workdir・state・questionは書き換えない（Hub管理）。`;
     return instructions.packet({ pdir: p.dir, project: p.id, task: t.id, policy: modelPolicy(p, t, where, all), issues: issuesRule, port: PORT, contextRule: launch.CONTEXT_RULE, askRule: chat.ASK_RULE,
-      common: [dir ? `cwd=${dir === p.dir ? '台帳' : '台帳/' + path.relative(p.dir, dir).split(path.sep).join('/')}。${rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? '専用の作業用コピー。ここだけで作業。本体には触らない（取り込みは人の［本体に取り込む］）。' : '本体。コピーは使わず、ここで作業してよい（Hub指定）。'}` : '', look, context, read].filter(Boolean).join('\n') });
+      common: [dir ? `cwd=${dir === p.dir ? '台帳' : '台帳/' + path.relative(p.dir, dir).split(path.sep).join('/')}。${rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? lt('専用の作業用コピー。ここだけで作業。本体には触らない（取り込みは人の［本体に取り込む］）。') : lt('本体。コピーは使わず、ここで作業してよい（Hub指定）。')}` : '', look, context, read].filter(Boolean).join('\n') });
   }
-  return [modelPolicy(p, t, where, all), where === 'terminal' ? TERMINAL_HANDOFF_NOTE + '\n' + TERMINAL_LIMIT_NOTE : '', where === 'terminal' && startup ? launch.startupInfo(startup.ai, startup.model) : '', launch.CONTEXT_RULE, copy, look, context, issuesRule, `作業「${String(t.title).replace(/[\r\n]+/g, ' ')}」（作業ID ${t.id}）の続きをしてください。まず次の3つを読むこと: ${path.join(p.dir, '.ai', 'rules.md')} / ${path.join(p.dir, 'PROJECT.md')} / ${file}。区切りごとに作業ファイルを更新し、「## 手順」の終わった所を [x] にすること（手順が無ければ3〜5個書く）。作業ファイルの先頭の workdir・state・question の行は Hub が管理する：書き換えない（特に、取り込み済みの後に古い内容で書き戻さない）。`].filter(Boolean).join('\n\n');
+  return [modelPolicy(p, t, where, all), where === 'terminal' ? TERMINAL_HANDOFF_NOTE + '\n' + TERMINAL_LIMIT_NOTE : '', where === 'terminal' && startup ? launch.startupInfo(startup.ai, startup.model) : '', launch.CONTEXT_RULE, copy, look, context, issuesRule, lt`作業「${String(t.title).replace(/[\r\n]+/g, ' ')}」（作業ID ${t.id}）の続きをしてください。まず次の3つを読むこと: ${path.join(p.dir, '.ai', 'rules.md')} / ${path.join(p.dir, 'PROJECT.md')} / ${file}。区切りごとに作業ファイルを更新し、「## 手順」の終わった所を [x] にすること（手順が無ければ3〜5個書く）。作業ファイルの先頭の workdir・state・question の行は Hub が管理する：書き換えない（特に、取り込み済みの後に古い内容で書き戻さない）。`].filter(Boolean).join('\n\n');
 }
 
 function usageWithLimit(snapshot) {
@@ -474,8 +485,19 @@ function usageWithLimit(snapshot) {
 }
 
 async function api(req, res, url) {
+  if (req.method === 'GET' && url.pathname === '/api/app-update') return send(res, 200, appUpdate.status());
+  if (req.method === 'POST' && ['/api/app-update', '/api/app-update/check'].includes(url.pathname)) {
+    if (fromRemote()) return send(res, 403, { error: 'forbidden' });
+    let body; try { body = await readBody(req); } catch { return send(res, 400, { error: lt('形式が違います') }); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return send(res, 400, { error: lt('形式が違います') });
+    if (url.pathname.endsWith('/check') || body.action === 'check') { void appUpdate.check().catch(() => {}); return send(res, 200, appUpdate.status()); }
+    if (typeof body.enabled !== 'boolean') return send(res, 400, { error: lt('形式が違います') });
+    try { return send(res, 200, await appUpdate.settings(body.enabled)); } catch (error) { return send(res, 400, { error: error.message }); }
+  }
+  if (req.method === 'POST' && appUpdate.applying() && !(['/api/quit', '/api/restart'].includes(url.pathname) && appUpdate.status().phase === 'installed')) return send(res, 409, { error: appUpdate.busyMessage() });
+  if (req.method === 'GET' && url.pathname === '/api/locale') return send(res, 200, localeConfig());
   // Mac の許可が無くて中を読めない時の知らせ（Finder が違う場所で開くのを防ぐ）
-  const denied = x => { try { fs.readdirSync(fs.statSync(x).isDirectory() ? x : path.dirname(x)); return ''; } catch (e) { return ['EPERM', 'EACCES'].includes(e.code) ? 'Mac の許可が無くて開けません。設定画面の「Mac のファイルの許可」で［確認をもう一度出す］を押し、「許可」を選んでください' : ''; } };
+  const denied = x => { try { fs.readdirSync(fs.statSync(x).isDirectory() ? x : path.dirname(x)); return ''; } catch (e) { return ['EPERM', 'EACCES'].includes(e.code) ? lt('Mac の許可が無くて開けません。設定画面の「Mac のファイルの許可」で［確認をもう一度出す］を押し、「許可」を選んでください') : ''; } };
   // 本体が台帳のフォルダ（書類フォルダの中）を読めるか。Mac の許可が本体に効いているかをアプリが確かめる
   if (req.method === 'GET' && url.pathname === '/api/access') {
     try { fs.readdirSync(ROOT); return send(res, 200, { ok: true, root: ROOT }); }
@@ -486,13 +508,13 @@ async function api(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, pid: process.pid });
   if (req.method === 'GET' && url.pathname === '/api/state') {
     const t0 = Date.now();
-    res.on('finish', () => { const ms = Date.now() - t0; if (ms > 2000) console.log(`[遅い] 一覧を作るのに ${ms}ms かかりました（台帳のファイルの読み込みが遅い可能性）`); });
+    res.on('finish', () => { const ms = Date.now() - t0; if (ms > 2000) console.log(lt`[遅い] 一覧を作るのに ${ms}ms かかりました（台帳のファイルの読み込みが遅い可能性）`); });
     const roleData = rolesData(), modelSettings = modelView.read(), initialPick = modelView.initial(modelSettings);
     pruneUnread(); // 起動前から残っていた通知・外で片付けられた作業にも対応する。
     // 画面で使う物だけ送る：作業の「やったこと」「注意」「メモ」の本文は送らず、「次にやること」は1行目だけ（1MB → 数百KB）
     const slim = t => { const { done, note, memo, next, ...rest } = t; return { ...rest, next: String(next || '').split('\n')[0] }; };
     const state = {
-      root: ROOT, roles: roleData, version: VERSION, latest: readVersion(),
+      root: ROOT, roles: roleData, version: VERSION, latest: readVersion(), appUpdate: appUpdate.status(),
       github: github.summary(),
       completionWarning: store.completion.warning, projectOrder: projectOrder.read(), projectPins: projectOrder.readPins(),
       taskHandoffs: taskTransfer.pending(),
@@ -538,7 +560,7 @@ async function api(req, res, url) {
   }
   if (req.method === 'POST' && url.pathname === '/api/limits/fable/clear') {
     try { limitEvidence.clear(); }
-    catch { return send(res, 500, { error: '解除を保存できませんでした' }); }
+    catch { return send(res, 500, { error: lt('解除を保存できませんでした') }); }
     record('limit-clear', {});
     // 解除に利用枠の取得を待たせない。遅れて届く応答もフラグを作らない。
     return send(res, 200, usageWithLimit(usage.snapshot()));
@@ -549,7 +571,7 @@ async function api(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/chat/stream') {
     const project = url.searchParams.get('project'), task = url.searchParams.get('task');
     const p = store.readProject(project);
-    if (!p || !store.taskFile(project, task)) return send(res, 404, { error: '作業が見つかりません' });
+    if (!p || !store.taskFile(project, task)) return send(res, 404, { error: lt('作業が見つかりません') });
     setUnread(project, task, false); // 開いたので読んだことにする
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
     const emit = ev => res.write(`data: ${JSON.stringify(ev)}\n\n`);
@@ -588,7 +610,7 @@ async function api(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/task/preview') {
     const p = store.readProject(url.searchParams.get('project'));
     const file = p && store.taskFile(p.id, url.searchParams.get('task'));
-    if (!file) return send(res, 400, { error: '作業が見つかりません' });
+    if (!file) return send(res, 400, { error: lt('作業が見つかりません') });
     const t = store.readTask(file);
     if (!inWork(p, t)) return send(res, 200, null);
     let r = null;
@@ -600,7 +622,7 @@ async function api(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/term/stream') {
     const project = url.searchParams.get('project'), task = url.searchParams.get('task'), ai = url.searchParams.get('ai');
     const s = sessions.get(project, task, ai);
-    if (!s) return send(res, 404, { error: '作業画面がありません' });
+    if (!s) return send(res, 404, { error: lt('作業画面がありません') });
     setUnread(project, task, false); // 開いたので読んだことにする
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
     const emit = ev => res.write(`data: ${JSON.stringify(ev)}\n\n`);
@@ -619,21 +641,21 @@ async function api(req, res, url) {
     const file = p && task ? store.taskFile(p.id, task) : null;
     const wd = file ? expandHome(store.readTask(file).workdir) : '';
     const info = p ? gitw.remoteInfo(wd && fs.existsSync(wd) ? wd : baseOf(p), { fresh: true }) : null;
-    return info ? send(res, 200, info) : send(res, 404, { error: 'GitHub の場所が見つかりません' });
+    return info ? send(res, 200, info) : send(res, 404, { error: lt('GitHub の場所が見つかりません') });
   }
 
   // 子プロジェクトの一覧（親で作業を続ける前に、終わっていない子を知らせるため）
   if (req.method === 'GET' && url.pathname === '/api/project/children') {
     const r = handoff.childrenSummary(store, url.searchParams.get('project'));
-    return r ? send(res, 200, r) : send(res, 404, { error: 'プロジェクトが見つかりません' });
+    return r ? send(res, 200, r) : send(res, 404, { error: lt('プロジェクトが見つかりません') });
   }
   if (req.method === 'GET' && url.pathname === '/api/start/image') {
     const p = store.readProject(url.searchParams.get('project'));
     try {
-      if (!p) throw Error('プロジェクトがありません');
+      if (!p) throw Error(lt('プロジェクトがありません'));
       const f = start.imageFile(p, url.searchParams.get('id'), true);
       return send(res, 200, fs.readFileSync(f), /\.jpe?g$/i.test(f) ? 'image/jpeg' : 'image/png');
-    } catch { return send(res, 404, { error: '画像が見つかりません' }); }
+    } catch { return send(res, 404, { error: lt('画像が見つかりません') }); }
   }
 
   if (req.method !== 'POST') return send(res, 405, { error: 'method' });
@@ -643,11 +665,11 @@ async function api(req, res, url) {
     const q = k => url.searchParams.get(k) || '';
     const p = store.readProject(q('project'));
     const file = p && store.taskFile(p.id, q('task'));
-    if (!file) { req.resume(); return send(res, 400, { error: '作業が見つかりません' }); }
+    if (!file) { req.resume(); return send(res, 400, { error: lt('作業が見つかりません') }); }
     let data;
-    try { data = await readRaw(req, MAX_UPLOAD); } catch (e) { return send(res, 413, { error: 'ファイルが大きすぎます（50MB まで）' }); }
+    try { data = await readRaw(req, MAX_UPLOAD); } catch (e) { return send(res, 413, { error: lt('ファイルが大きすぎます（50MB まで）') }); }
     const saved = saveUpload(q('name'), data);
-    store.updateTask(p.id, q('task'), { memo: `ファイルを渡した: ${saved}` });
+    store.updateTask(p.id, q('task'), { memo: lt`ファイルを渡した: ${saved}` });
     const ai = launch.AIS.includes(q('ai')) ? q('ai') : '';
     const typed = ai ? sessions.write(p.id, q('task'), ai, (/\s/.test(saved) ? `"${saved}"` : saved) + ' ') : false;
     record('upload', { project: p.id, task: q('task'), ai }, { file: saved, bytes: data.length });
@@ -656,7 +678,7 @@ async function api(req, res, url) {
 
   if (url.pathname === '/api/start/image') {
     const p = store.readProject(url.searchParams.get('project'));
-    if (!p) { req.resume(); return send(res, 400, { error: 'プロジェクトがありません' }); }
+    if (!p) { req.resume(); return send(res, 400, { error: lt('プロジェクトがありません') }); }
     try { return send(res, 200, start.saveImage(p, url.searchParams.get('name') || 'image.png', await readRaw(req, start.MAX))); }
     catch (e) { return send(res, 400, { error: e.message }); }
   }
@@ -666,9 +688,9 @@ async function api(req, res, url) {
   if (url.pathname === '/api/github/owners') return send(res, 200, { owners: await github.owners(b.account) });
   if (url.pathname === '/api/github/preview' || url.pathname === '/api/github/create') {
     const p = store.readProject(b.project);
-    if (!p) return send(res, 404, { error: 'プロジェクトが見つかりません' });
+    if (!p) return send(res, 404, { error: lt('プロジェクトが見つかりません') });
     if (url.pathname.endsWith('/preview')) return send(res, 200, await github.preview(githubProject(p)));
-    if (b.confirm !== true) return send(res, 400, { error: '確認画面で［作る］を押してください' });
+    if (b.confirm !== true) return send(res, 400, { error: lt('確認画面で［作る］を押してください') });
     const r = await github.create(githubProject(p), b);
     record('githubcreate', { project: p.id }, { ok: r.ok, pushed: r.pushed, private: true, partial: Boolean(r.partial) });
     return send(res, 200, r);
@@ -682,27 +704,27 @@ async function api(req, res, url) {
   // ChatGPT に貼る文：普段の ChatGPT の会話は Mac の道具（MCP）を使えないので、作業の中身を文に入れる
   if (url.pathname === '/api/chatgpt/prompt') {
     const p = store.readProject(b.project), file = p && store.taskFile(b.project, b.task);
-    if (!file || !fs.existsSync(file)) return send(res, 400, { error: '作業が見つかりません' });
-    const cut = (v, n) => (v.length > n ? v.slice(0, n) + '\n…（長いので省略）' : v);
+    if (!file || !fs.existsSync(file)) return send(res, 400, { error: lt('作業が見つかりません') });
+    const cut = (v, n) => (v.length > n ? v.slice(0, n) + lt('\n…（長いので省略）') : v);
     let ledger = ''; try { ledger = fs.readFileSync(path.join(p.dir, 'PROJECT.md'), 'utf8'); } catch (e) { /* 無くてもよい */ }
     const rows = chat.read(p.dir, b.task).filter(r => (r.role === 'user' || r.role === 'assistant') && r.text).slice(-6);
-    const talk = rows.map(r => `[${r.role === 'user' ? (r.from ? '結果' : '人') : (launch.AI_LABEL[r.ai] || r.ai || 'AI')}] ${cut(r.text, 1500)}`).join('\n\n');
+    const talk = rows.map(r => `[${r.role === 'user' ? (r.from ? lt('結果') : displayLabel('人')) : (launch.AI_LABEL[r.ai] || r.ai || 'AI')}] ${cut(r.text, 1500)}`).join('\n\n');
     const text = typeof b.text === 'string' ? b.text.trim() : '';
-    const out = [`Project Hub の作業「${b.task}」をお願いします。必要な中身は下に全部入れてあります（道具やファイルを探す必要はありません）。相談・レビュー役として、日本語で答えてください。最後に「## 結果」と「## 次にやること」を短くまとめてください。人に決めてほしいことがあれば「## 質問」に書いてください。`,
-      `# 作業ファイル\n${cut(fs.readFileSync(file, 'utf8'), 12000)}`,
-      ledger && `# 台帳（PROJECT.md）\n${cut(ledger, 4000)}`,
-      talk && `# これまでの会話（新しい6件）\n${talk}`,
-      text && `# 今回の依頼\n${text}`].filter(Boolean).join('\n\n');
+    const out = [lt`Project Hub の作業「${b.task}」をお願いします。必要な中身は下に全部入れてあります（道具やファイルを探す必要はありません）。相談・レビュー役として、日本語で答えてください。最後に「## 結果」と「## 次にやること」を短くまとめてください。人に決めてほしいことがあれば「## 質問」に書いてください。`,
+      lt`# 作業ファイル\n${cut(fs.readFileSync(file, 'utf8'), 12000)}`,
+      ledger && lt`# 台帳（PROJECT.md）\n${cut(ledger, 4000)}`,
+      talk && lt`# これまでの会話（新しい6件）\n${talk}`,
+      text && lt`# 今回の依頼\n${text}`].filter(Boolean).join('\n\n');
     return send(res, 200, { ok: true, text: out });
   }
   // ChatGPT の返事を貼って Hub に戻す（会話に ChatGPT の返事として残し、作業ファイルに1行書く）
   if (url.pathname === '/api/chatgpt/result') {
     const p = store.readProject(b.project), file = p && store.taskFile(b.project, b.task);
     const text = typeof b.text === 'string' ? b.text.trim() : '';
-    if (!file || !fs.existsSync(file) || !text || text.length > 50000) return send(res, 400, { error: '作業と返事を確かめてください' });
+    if (!file || !fs.existsSync(file) || !text || text.length > 50000) return send(res, 400, { error: lt('作業と返事を確かめてください') });
     const row = chat.append(p.dir, b.task, { role: 'assistant', ai: 'chatgpt', text });
     chats.emit(p.id, b.task, { type: 'row', row });
-    try { store.appendSection(p.id, b.task, 'やったこと', `- ${new Date().toISOString().slice(0, 16).replace('T', ' ')} ChatGPT の返事を受け取った（会話に記録）`); } catch (e) { /* 無くてもよい */ }
+    try { store.appendSection(p.id, b.task, 'やったこと', lt`- ${new Date().toISOString().slice(0, 16).replace('T', ' ')} ChatGPT の返事を受け取った（会話に記録）`); } catch (e) { /* 無くてもよい */ }
     return send(res, 200, { ok: true });
   }
   // ChatGPT アプリ（中身は Codex）に Hub の道具を登録する：~/.codex/config.toml に [mcp_servers.project-hub] を書き足す
@@ -713,7 +735,7 @@ async function api(req, res, url) {
     return send(res, 200, { ...gpt.settings(), ...codexMcpStatus(), ...r });
   }
   if (url.pathname === '/api/chatgpt') {
-    if (typeof b.work !== 'boolean') return send(res, 400, { error: '形式が違います' });
+    if (typeof b.work !== 'boolean') return send(res, 400, { error: lt('形式が違います') });
     const s = gpt.save({ work: b.work }); record('chatgptwork', {}, { work: s.work });
     return send(res, 200, s);
   }
@@ -724,7 +746,7 @@ async function api(req, res, url) {
   }
   if (url.pathname === '/api/start/image-path') {
     const p = store.readProject(b.project);
-    try { if (!p) throw Error('プロジェクトがありません'); return send(res, 200, start.imageFromPath(p, b.path)); }
+    try { if (!p) throw Error(lt('プロジェクトがありません')); return send(res, 200, start.imageFromPath(p, b.path)); }
     catch (e) { return send(res, 400, { error: e.message }); }
   }
   if (url.pathname === '/api/start') {
@@ -732,9 +754,9 @@ async function api(req, res, url) {
     const ai = b.ai === 'claude-code' ? 'claude' : b.ai;
     const agents = new Set([...rolesData().agents, ...store.listProjects().flatMap(x => x.tasks.map(t => t.owner).filter(o => o && !/claude|codex|agy|^chatgpt$|^(人|あなた)$/i.test(o)).map(o => o.replace(/^discord:\s*/i, '')))]);
     const agent = typeof ai === 'string' && ai.startsWith('discord:') && agents.has(ai.slice(8));
-    if (!p || (!text && !(b.images || []).length) || (!launch.AIS.includes(ai) && !agent)) return send(res, 400, { error: '依頼と担当を確認してください' });
-    if (text.length > 4000 || !Array.isArray(b.images) || b.images.length > 10) return send(res, 400, { error: '依頼は4000文字、画像は10枚までです' });
-    if (!agent && aiTools.isOperating()) return send(res, 409, { error: 'AI の更新・モデル再取得が進行中です' });
+    if (!p || (!text && !(b.images || []).length) || (!launch.AIS.includes(ai) && !agent)) return send(res, 400, { error: lt('依頼と担当を確認してください') });
+    if (text.length > 4000 || !Array.isArray(b.images) || b.images.length > 10) return send(res, 400, { error: lt('依頼は4000文字、画像は10枚までです') });
+    if (!agent && aiTools.isOperating()) return send(res, 409, { error: lt('AI の更新・モデル再取得が進行中です') });
     const ph = p.phases.find(x => x.state !== '完了');
     const spec = agent ? { model: '', effort: '' } : pickSpec({ role: ph?.role, model: b.model, effort: b.effort }, ai);
     const invalid = !agent && modelError(ai, spec.model);
@@ -745,20 +767,20 @@ async function api(req, res, url) {
     const writeReceipt = value => { if (b.request) { fs.mkdirSync(path.dirname(receiptFile), { recursive: true }); fs.writeFileSync(receiptFile, JSON.stringify({ request: b.request, ...value })); } };
     let t;
     try {
-      for (const id of b.images) if (!fs.existsSync(start.imageFile(p, id))) throw Error('添付画像が見つかりません');
+      for (const id of b.images) if (!fs.existsSync(start.imageFile(p, id))) throw Error(lt('添付画像が見つかりません'));
       // 途中で失敗しても同じ作業を再開し、重複作成を防ぐ。
       if (b.request && receipt?.request === b.request) b.task = receipt.task;
       t = b.task && store.taskFile(p.id, b.task) ? store.readTask(store.taskFile(p.id, b.task)) : null;
-      if (t && chats.busy(p.id, t.id)) throw Error('この作業はすでに始まっています');
-      t ||= store.createTask(p.id, { title: (text.split('\n')[0] || '画像を確認する').slice(0, 40), owner: agent ? ai : launch.AI_KEY[ai], role: ph?.role || '', phase: ph?.name || '' });
+      if (t && chats.busy(p.id, t.id)) throw Error(lt('この作業はすでに始まっています'));
+      t ||= store.createTask(p.id, { title: (text.split('\n')[0] || lt('画像を確認する')).slice(0, 40), owner: agent ? ai : launch.AI_KEY[ai], role: ph?.role || '', phase: ph?.name || '' });
       writeReceipt({ task: t.id });
       const { dir, note } = startDir(p, t);
       const images = start.copyImages(p, b.images, dir, t.id);
       store.updateTask(p.id, t.id, { owner: agent ? ai : launch.AI_KEY[ai], ...spec });
-      const prompt = start.imagePrompt(ai, text || '添付画像を確認してください。', images);
+      const prompt = start.imagePrompt(ai, text || lt('添付画像を確認してください。'), images);
       const file = store.taskFile(p.id, t.id);
       if (agent) {
-        const notice = 'Discordへの自動送信は未対応です。依頼文と画像の場所を保存しました。Discordで担当へ渡してください。';
+        const notice = lt('Discordへの自動送信は未対応です。依頼文と画像の場所を保存しました。Discordで担当へ渡してください。');
         store.updateTask(p.id, t.id, { state: '返事待ち', question: notice, memo: prompt });
         chat.append(p.dir, t.id, { role: 'user', to: ai, text: prompt });
       } else {
@@ -767,8 +789,8 @@ async function api(req, res, url) {
           if (row.asks?.length) store.updateTask(p.id, t.id, { state: '返事待ち', question: row.asks.map(a => a.question).join(' / ').slice(0, 300) });
           chatEnded(p.id, t.id);
         } };
-        if (!DRY && !(await chats.send(turn).started)) throw Error('AIを起動できませんでした。CLIの導入状態を確認してください');
-        store.updateTask(p.id, t.id, { state: '実行中', question: '', memo: images.length ? '参照画像: ' + images.join(' / ') : '' });
+        if (!DRY && !(await chats.send(turn).started)) throw Error(lt('AIを起動できませんでした。CLIの導入状態を確認してください'));
+        store.updateTask(p.id, t.id, { state: '実行中', question: '', memo: images.length ? lt('参照画像: ') + images.join(' / ') : '' });
         if (DRY) t.turn = chat.buildTurn({ ...turn, rows: [], meta: {} });
       }
       start.saveSpec(p, { ai, ...spec });
@@ -781,7 +803,7 @@ async function api(req, res, url) {
 
   if (url.pathname === '/api/ai-tools/check') {
     try { return send(res, 200, await aiTools.checkUpdate(b.ai)); }
-    catch (e) { return send(res, e.status || 502, { error: e.reason || '更新情報の確認に失敗しました', stage: e.stage }); }
+    catch (e) { return send(res, e.status || 502, { error: e.reason || lt('更新情報の確認に失敗しました'), stage: e.stage }); }
   }
   if (url.pathname === '/api/ai-tools/update' || url.pathname === '/api/ai-tools/models/refresh') {
     try {
@@ -790,18 +812,18 @@ async function api(req, res, url) {
       record(url.pathname.endsWith('/update') ? 'aiupdate' : 'aimodels', { ai: b.ai }, { added: result.models?.added ?? result.added ?? 0 });
       return send(res, 200, result);
     } catch (e) {
-      return send(res, e.status || 502, { error: e.reason || e.message || 'CLI の操作に失敗しました', stage: e.stage || 'operation', reason: e.reason || e.message || '' });
+      return send(res, e.status || 502, { error: e.reason || e.message || lt('CLI の操作に失敗しました'), stage: e.stage || 'operation', reason: e.reason || e.message || '' });
     }
   }
   if (aiTools.isOperating() && ['/api/term/start', '/api/term/handoff', '/api/continue', '/api/chat/send'].includes(url.pathname)) {
-    return send(res, 409, { error: 'AI の更新・モデル再取得が進行中です。終わってから始めてください' });
+    return send(res, 409, { error: lt('AI の更新・モデル再取得が進行中です。終わってから始めてください') });
   }
 
   // 作業画面を開く（画面の中）
   if (url.pathname === '/api/term/start') {
     const p = store.readProject(b.project);
     const file = store.taskFile(b.project, b.task);
-    if (!p || !file || !launch.AIS.includes(b.ai)) return send(res, 400, { error: '作業が見つかりません' });
+    if (!p || !file || !launch.AIS.includes(b.ai)) return send(res, 400, { error: lt('作業が見つかりません') });
     const t = store.readTask(file);
     const { model, effort } = pickSpec(t, b.ai);
     const invalidModel = modelError(b.ai, model);
@@ -823,10 +845,10 @@ async function api(req, res, url) {
   if (url.pathname === '/api/term/handoff') {
     const p = store.readProject(b.project);
     const file = store.taskFile(b.project, b.task);
-    if (!p || !file || !launch.AIS.includes(b.to)) return send(res, 400, { error: '作業が見つかりません' });
+    if (!p || !file || !launch.AIS.includes(b.to)) return send(res, 400, { error: lt('作業が見つかりません') });
     const t = store.readTask(file);
     const from = b.from || (b.to === 'claude' ? 'codex' : b.to === 'codex' ? 'claude' : '');
-    if (!launch.AIS.includes(from) || from === b.to) return send(res, 400, { error: '交代元を指定してください' });
+    if (!launch.AIS.includes(from) || from === b.to) return send(res, 400, { error: lt('交代元を指定してください') });
     const LABEL = launch.AI_LABEL;
     const tgt = sessions.get(b.project, b.task, b.to);
     const tgtLive = tgt && !tgt.exited;
@@ -834,7 +856,7 @@ async function api(req, res, url) {
       const invalidModel = modelError(b.to, pickSpec(t, b.to).model);
       if (invalidModel) return send(res, 409, { error: invalidModel });
     }
-    if (tgtLive && Date.now() - tgt.lastOut < 20000) return send(res, 409, { error: `${LABEL[b.to]} が作業中です。止まってから（入力待ちになってから）交代してください` });
+    if (tgtLive && Date.now() - tgt.lastOut < 20000) return send(res, 409, { error: lt`${LABEL[b.to]} が作業中です。止まってから（入力待ちになってから）交代してください` });
     const src = sessions.get(b.project, b.task, from);
     const { dir } = tgtLive ? { dir: tgt.dir } : startDir(p, t);
     const convo = transcript.collect({ ai: from, dir: (src && src.dir) || dir, since: src ? src.started : Date.now() - 3 * 86400000, buf: src && src.buf });
@@ -845,7 +867,7 @@ async function api(req, res, url) {
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
     const packetFile = path.join(hdir, `${t.id}-${stamp}-${from}.md`);
     fs.writeFileSync(packetFile, transcript.packet({ fromLabel: LABEL[from], toLabel: LABEL[b.to], taskFile: file, board, convo, extra: note }));
-    const msg = `${LABEL[from]} から交代です。引き継ぎ資料 ${packetFile} を読み、${file} と ${board} も確かめてから、あなたの役割で続けてください。`;
+    const msg = lt`${LABEL[from]} から交代です。引き継ぎ資料 ${packetFile} を読み、${file} と ${board} も確かめてから、あなたの役割で続けてください。`;
     let started = false, spec = null;
     if (tgtLive) {
       sessions.type(b.project, b.task, b.to, msg);
@@ -856,20 +878,20 @@ async function api(req, res, url) {
       try { sessions.start({ project: b.project, task: b.task, ai: b.to, dir, command: argv.command, args: argv.args, cols: b.cols, rows: b.rows }); started = true; }
       catch (e) { return send(res, 500, { error: String(e.message || e), packet: packetFile }); }
     }
-    store.updateTask(p.id, t.id, { owner: launch.AI_KEY[b.to], memo: `${LABEL[from]} から ${LABEL[b.to]} へ交代（引き継ぎ資料: ${packetFile}）` });
+    store.updateTask(p.id, t.id, { owner: launch.AI_KEY[b.to], memo: lt`${LABEL[from]} から ${LABEL[b.to]} へ交代（引き継ぎ資料: ${packetFile}）` });
     record('handoff', b, { packet: packetFile, kind: convo.kind, started });
     return send(res, 200, { ok: true, packet: packetFile, kind: convo.kind, started, ...(spec || {}) });
   }
   // 動いている AI のモデル・思考を変える：作業ファイルに残し、その AI に /model・/effort を打つ
   if (url.pathname === '/api/term/switch') {
-    if (b.ai === 'agy') return send(res, 409, { error: 'Agy は承認された Gemini 3.1 Pro (High) に固定しています' });
-    if (!launch.AIS.includes(b.ai) || !['model', 'effort'].includes(b.field)) return send(res, 400, { error: '指定が正しくありません' });
+    if (b.ai === 'agy') return send(res, 409, { error: lt('Agy は承認された Gemini 3.1 Pro (High) に固定しています') });
+    if (!launch.AIS.includes(b.ai) || !['model', 'effort'].includes(b.field)) return send(res, 400, { error: lt('指定が正しくありません') });
     if (b.field === 'model') {
       const invalidModel = modelError(b.ai, String(b.value || ''));
       if (invalidModel) return send(res, 409, { error: invalidModel });
     }
     const t = store.updateTask(b.project, b.task, { [b.field]: typeof b.value === 'string' ? b.value : '' });
-    if (!t) return send(res, 400, { error: '作業が見つかりません' });
+    if (!t) return send(res, 400, { error: lt('作業が見つかりません') });
     const spec = pickSpec(t, b.ai);
     const cmd = launch.switchCommand(b.ai, b.field, spec[b.field]);
     const sent = Boolean(cmd) && sessions.type(b.project, b.task, b.ai, cmd);
@@ -891,7 +913,7 @@ async function api(req, res, url) {
   if (url.pathname === '/api/continue') {
     const p = store.readProject(b.project);
     const file = store.taskFile(b.project, b.task);
-    if (!p || !file || !launch.AIS.includes(b.ai)) return send(res, 400, { error: '作業が見つかりません' });
+    if (!p || !file || !launch.AIS.includes(b.ai)) return send(res, 400, { error: lt('作業が見つかりません') });
     const t = store.readTask(file);
     const spec = pickSpec(t, b.ai);
     const invalidModel = modelError(b.ai, spec.model);
@@ -905,13 +927,13 @@ async function api(req, res, url) {
   // フォルダを Finder で開く（台帳に書かれた場所だけ）
   if (url.pathname === '/api/open') {
     const p = store.readProject(b.project);
-    if (!p) return send(res, 400, { error: 'プロジェクトが見つかりません' });
+    if (!p) return send(res, 400, { error: lt('プロジェクトが見つかりません') });
     let target = null;
     if (b.kind === 'project') target = p.dir;
     else if (b.kind === 'folder') target = (p.folders.find(f => f.label === b.label) || {}).path;
     else if (b.kind === 'workdir') { const f = store.taskFile(b.project, b.task); target = f && store.readTask(f).workdir; }
     target = expandHome(target || '');
-    if (!target || !fs.existsSync(target)) return send(res, 404, { error: 'その場所が見つかりません', path: target });
+    if (!target || !fs.existsSync(target)) return send(res, 404, { error: lt('その場所が見つかりません'), path: target });
     if (denied(target)) return send(res, 403, { error: denied(target), path: target });
     const r = await launch.openFolder(target, DRY);
     return send(res, 200, { ok: true, path: target, ...(DRY ? { r } : {}) });
@@ -920,7 +942,7 @@ async function api(req, res, url) {
   // 文の中のファイル・フォルダを Finder で開く（作業の場所からの相対でもよい。ホームの中だけ）
   if (url.pathname === '/api/reveal') {
     const raw = String(b.path || '').trim();
-    if (!raw) return send(res, 400, { error: '場所がありません' });
+    if (!raw) return send(res, 400, { error: lt('場所がありません') });
     const p = store.readProject(b.project);
     const f = p && b.task ? store.taskFile(b.project, b.task) : null;
     const t = f ? store.readTask(f) : null;
@@ -928,7 +950,7 @@ async function api(req, res, url) {
     const list = raw.startsWith('~') || path.isAbsolute(raw) ? [expandHome(raw)] : bases.map(d => path.join(d, raw));
     const home = [os.homedir(), ROOT].map(d => path.resolve(d));
     const target = list.map(x => path.resolve(x)).find(x => home.some(h => x === h || x.startsWith(h + path.sep)) && fs.existsSync(x));
-    if (!target) return send(res, 404, { error: `見つかりません：${raw}` });
+    if (!target) return send(res, 404, { error: lt`見つかりません：${raw}` });
     if (denied(target)) return send(res, 403, { error: denied(target) });
     const isDir = fs.statSync(target).isDirectory();
     // info＝開かず種類と場所を返す／list＝フォルダの中身／open＝元ファイルを既定アプリで開く／finder＝Finderで表示
@@ -939,7 +961,7 @@ async function api(req, res, url) {
       try {
         entries = fs.readdirSync(target, { withFileTypes: true }).filter(d => !d.name.startsWith('.')).slice(0, 500)
           .map(d => { const full = path.join(target, d.name); let st = null; try { st = fs.statSync(full); } catch (e) { /* 読めない物 */ } return { name: d.name, path: full, dir: st ? st.isDirectory() : d.isDirectory(), size: st ? st.size : 0, mtime: st ? st.mtimeMs : 0 }; })
-          .sort((x, y) => (x.dir === y.dir ? x.name.localeCompare(y.name, 'ja') : x.dir ? -1 : 1));
+          .sort((x, y) => (x.dir === y.dir ? x.name.localeCompare(y.name, locale()) : x.dir ? -1 : 1));
       } catch (e) { return send(res, 403, { error: denied(target) || String(e.message) }); }
       const up = path.dirname(target);
       return send(res, 200, { ok: true, path: target, dir: true, entries, parent: home.some(h => up === h || up.startsWith(h + path.sep)) ? up : '' });
@@ -954,7 +976,7 @@ async function api(req, res, url) {
   // URL を既定のブラウザで開く（http・https だけ）
   if (url.pathname === '/api/open-url') {
     const u = String(b.url || '');
-    if (!/^https?:\/\/[^\s]+$/.test(u)) return send(res, 400, { error: '開けない URL です' });
+    if (!/^https?:\/\/[^\s]+$/.test(u)) return send(res, 400, { error: lt('開けない URL です') });
     const r = await launch.openUrl(u, DRY);
     return send(res, 200, { ok: true, ...(DRY ? { r } : {}) });
   }
@@ -963,99 +985,99 @@ async function api(req, res, url) {
   // 作業用コピーの古い記録を片付ける（場所が無い時だけ。取り込み済みの後に AI が書き戻した時など）
   if (url.pathname === '/api/task/copyclear') {
     const p = store.readProject(b.project), file = p && store.taskFile(b.project, b.task), t = file && store.readTask(file);
-    if (!t) return send(res, 400, { error: '作業が見つかりません' });
-    if (!copyMissing(p, t)) return send(res, 409, { error: '作業用コピーはまだあります（片付けるのは、場所が無い時だけ）' });
+    if (!t) return send(res, 400, { error: lt('作業が見つかりません') });
+    if (!copyMissing(p, t)) return send(res, 409, { error: lt('作業用コピーはまだあります（片付けるのは、場所が無い時だけ）') });
     const m = lastMerge(p.id, t.id);
-    const done = store.updateTask(p.id, t.id, { workdir: '', memo: m ? '本体に取り込み済み。作業用コピーの古い記録を片付けた' : '作業用コピーの古い記録を片付けた' });
+    const done = store.updateTask(p.id, t.id, { workdir: '', memo: m ? lt('本体に取り込み済み。作業用コピーの古い記録を片付けた') : lt('作業用コピーの古い記録を片付けた') });
     record('copyclear', b, { merged: Boolean(m) });
     return send(res, 200, { ok: true, merged: Boolean(m), task: done });
   }
   if (url.pathname === '/api/task') {
     if (fromRemote()) record('task', b, { state: b.state, question: b.question !== undefined, memo: b.memo !== undefined });
-    if (b.state === '完了') return send(res, 409, { error: '［完了に移す］で内容を確認してから完了にしてください' });
+    if (b.state === '完了') return send(res, 409, { error: lt('［完了に移す］で内容を確認してから完了にしてください') });
     const str = k => (typeof b[k] === 'string' ? b[k] : undefined);
     let context = {};
     if (['kind','derivedFrom','parent','workspaceMode'].some(k => b[k] !== undefined)) {
       try {
         const p=store.readProject(b.project), file=store.taskFile(b.project,b.task), t=file && store.readTask(file);
-        if (!p || !t) throw Error('作業がありません');
+        if (!p || !t) throw Error(lt('作業がありません'));
         context=require('./lib/work-context').validateTask(p,t,b,store.listProjects());
-        if (b.workspaceMode !== undefined && b.workspaceMode !== t.workspaceMode && (t.workspaceStarted || t.state !== '未着手' || t.workdir || chats.busy(p.id,t.id) || sessions.list().some(s=>s.project===p.id && s.task===t.id && s.running))) throw Error('場所は作業開始前に選んでください。既存コピーは自動で移しません');
+        if (b.workspaceMode !== undefined && b.workspaceMode !== t.workspaceMode && (t.workspaceStarted || t.state !== '未着手' || t.workdir || chats.busy(p.id,t.id) || sessions.list().some(s=>s.project===p.id && s.task===t.id && s.running))) throw Error(lt('場所は作業開始前に選んでください。既存コピーは自動で移しません'));
       } catch(e) { return send(res,409,{error:e.message}); }
     }
     const t = store.updateTask(b.project, b.task, {
       state: str('state'), question: str('question'), owner: str('owner'), role: str('role'),
       ...context, model: str('model'), effort: str('effort'), parent: str('parent'), phase: str('phase'), via: str('via'), memo: b.memo,
     });
-    return t ? send(res, 200, t) : send(res, 400, { error: '作業が見つかりません' });
+    return t ? send(res, 200, t) : send(res, 400, { error: lt('作業が見つかりません') });
   }
   if (url.pathname === '/api/task/completion') {
-    if (b.confirm !== true) return send(res, 400, { error: '完了に移すか確認してください' });
-    if (b.action === 'approve' && (chats.running.has(`${b.project}\u0000${b.task}`) || launch.AIS.some(a => { const s = sessions.get(b.project, b.task, a); return s && !s.exited; }))) return send(res, 409, { error: 'AIが作業中です。終わってから完了を確認してください' });
+    if (b.confirm !== true) return send(res, 400, { error: lt('完了に移すか確認してください') });
+    if (b.action === 'approve' && (chats.running.has(`${b.project}\u0000${b.task}`) || launch.AIS.some(a => { const s = sessions.get(b.project, b.task, a); return s && !s.exited; }))) return send(res, 409, { error: lt('AIが作業中です。終わってから完了を確認してください') });
     const t = store.decideTask(b.project, b.task, b.action, b.expectedHash);
     if (t?.error) return send(res, t.status, { error: t.error });
     if (t) record(b.action === 'approve' ? 'taskdone' : 'taskreopen', b);
-    if (t && b.action === 'approve') { const p = store.readProject(b.project); if (p) reportChild(p, '作業の完了', [t.title, handoff.lastEntry(t.done)].filter(Boolean).join('\n')); }
-    return t ? send(res, 200, t) : send(res, 400, { error: '作業が見つかりません' });
+    if (t && b.action === 'approve') { const p = store.readProject(b.project); if (p) reportChild(p, lt('作業の完了'), [t.title, handoff.lastEntry(t.done)].filter(Boolean).join('\n')); }
+    return t ? send(res, 200, t) : send(res, 400, { error: lt('作業が見つかりません') });
   }
   // 手順に印を付ける・外す
   if (url.pathname === '/api/task/step') {
     const t = typeof b.add === 'string' ? store.addStep(b.project, b.task, b.add) : store.setStep(b.project, b.task, Number(b.index), Boolean(b.done));
-    return t ? send(res, 200, t) : send(res, 400, { error: 'その手順が見つかりません' });
+    return t ? send(res, 200, t) : send(res, 400, { error: lt('その手順が見つかりません') });
   }
   if (url.pathname === '/api/phase/continue') {
     const current = store.readProject(b.project);
-    if (!current || current.completionHash !== b.expectedHash) return send(res, 409, { error: '確認中にフェーズが更新されました' });
+    if (!current || current.completionHash !== b.expectedHash) return send(res, 409, { error: lt('確認中にフェーズが更新されました') });
     const p = store.continuePhase(b.project); return send(res, 200, p);
   }
   // プロジェクトを完了にする・戻す（人がはっきり押した時だけ）
   if (url.pathname === '/api/project/status') {
-    if (b.status === '完了' && b.confirm !== true) return send(res, 400, { error: '完了に移すか確認してください' });
+    if (b.status === '完了' && b.confirm !== true) return send(res, 400, { error: lt('完了に移すか確認してください') });
     const current = store.readProject(b.project);
-    if ((b.status === '完了' || b.expectedHash) && current?.completionHash !== b.expectedHash) return send(res, 409, { error: '確認中にプロジェクトが更新されました' });
-    if (!['完了', '進行中'].includes(b.status)) return send(res, 400, { error: '形式が違います' });
+    if ((b.status === '完了' || b.expectedHash) && current?.completionHash !== b.expectedHash) return send(res, 409, { error: lt('確認中にプロジェクトが更新されました') });
+    if (!['完了', '進行中'].includes(b.status)) return send(res, 400, { error: lt('形式が違います') });
     if (b.status === '完了') {
-    if (sessions.list().some(x => x.project === b.project && x.running) || [...chats.running.keys()].some(k => k.startsWith(b.project + '\u0000'))) return send(res, 409, { error: 'このプロジェクトでAIが作業中です。終わってから完了を確認してください' });
+    if (sessions.list().some(x => x.project === b.project && x.running) || [...chats.running.keys()].some(k => k.startsWith(b.project + '\u0000'))) return send(res, 409, { error: lt('このプロジェクトでAIが作業中です。終わってから完了を確認してください') });
     }
     const p = store.setProjectStatus(b.project, b.status);
     if (p) record(b.status === '完了' ? 'projectdone' : 'projectreopen', { project: b.project });
     if (p && b.status === '完了' && p.status === '完了') reportChild(p, '完了', handoff.completionText(p));
-    return p ? send(res, 200, { ok: true, status: p.status }) : send(res, 400, { error: 'プロジェクトが見つかりません' });
+    return p ? send(res, 200, { ok: true, status: p.status }) : send(res, 400, { error: lt('プロジェクトが見つかりません') });
   }
   // 親に結果を渡す（人がはっきり押した時）。文が無ければ一番新しい作業の「やったこと」の最後
   if (url.pathname === '/api/project/handoff') {
     const p = store.readProject(b.project);
-    if (!p) return send(res, 400, { error: 'プロジェクトが見つかりません' });
+    if (!p) return send(res, 400, { error: lt('プロジェクトが見つかりません') });
     const t = handoff.newestTask(p);
     const text = (typeof b.text === 'string' && b.text.trim()) || (t ? handoff.lastEntry(t.done) : '');
-    if (!text) return send(res, 400, { error: '渡す内容がありません。文を書くか、作業の「やったこと」を書いてください' });
-    if (text.length > 4000) return send(res, 400, { error: '渡す文は4000文字までです' });
-    const r = reportChild(p, '報告', text);
-    if (!r) return send(res, 400, { error: '親プロジェクトが見つかりません' });
+    if (!text) return send(res, 400, { error: lt('渡す内容がありません。文を書くか、作業の「やったこと」を書いてください') });
+    if (text.length > 4000) return send(res, 400, { error: lt('渡す文は4000文字までです') });
+    const r = reportChild(p, lt('報告'), text);
+    if (!r) return send(res, 400, { error: lt('親プロジェクトが見つかりません') });
     return send(res, 200, { ok: true, parent: r.parent, task: r.task, duplicate: r.duplicate });
   }
   // 次のフェーズへ進む（今のフェーズを完了に）
   if (url.pathname === '/api/phase/next') {
-    if (b.confirm !== true) return send(res, 400, { error: '今のフェーズを完了に移すか確認してください' });
+    if (b.confirm !== true) return send(res, 400, { error: lt('今のフェーズを完了に移すか確認してください') });
     const current = store.readProject(b.project);
-    if (!current || b.expectedHash !== current.completionHash) return send(res, 409, { error: '確認中にフェーズが更新されました。内容を読み直してください' });
-    if (sessions.list().some(x => x.project === b.project && x.running) || [...chats.running.keys()].some(k => k.startsWith(b.project + '\u0000'))) return send(res, 409, { error: 'このプロジェクトでAIが作業中です。終わってから完了を確認してください' });
+    if (!current || b.expectedHash !== current.completionHash) return send(res, 409, { error: lt('確認中にフェーズが更新されました。内容を読み直してください') });
+    if (sessions.list().some(x => x.project === b.project && x.running) || [...chats.running.keys()].some(k => k.startsWith(b.project + '\u0000'))) return send(res, 409, { error: lt('このプロジェクトでAIが作業中です。終わってから完了を確認してください') });
     const p = store.nextPhase(b.project);
     if (p) record('nextphase', b);
-    return p ? send(res, 200, { ok: true, phases: p.phases }) : send(res, 400, { error: 'プロジェクトが見つかりません' });
+    return p ? send(res, 200, { ok: true, phases: p.phases }) : send(res, 400, { error: lt('プロジェクトが見つかりません') });
   }
   // コピーと再開先は保持したまま、取り込み対象から外す・戻す
   if (url.pathname === '/api/task/merge-exclusion') {
-    if (typeof b.excluded !== 'boolean') return send(res, 400, { error: '除外するかどうかを指定してください' });
+    if (typeof b.excluded !== 'boolean') return send(res, 400, { error: lt('除外するかどうかを指定してください') });
     const p = store.readProject(b.project);
     const file = p && store.taskFile(p.id, b.task);
-    if (!file) return send(res, 400, { error: '作業が見つかりません' });
+    if (!file) return send(res, 400, { error: lt('作業が見つかりません') });
     const t = store.readTask(file);
-    if (!inWork(p, t)) return send(res, 400, { error: 'この作業には作業用コピーがありません' });
+    if (!inWork(p, t)) return send(res, 400, { error: lt('この作業には作業用コピーがありません') });
     if (t.mergeExcluded === b.excluded) return send(res, 200, { ok: true, task: t });
     const updated = store.updateTask(p.id, t.id, {
       mergeExcluded: b.excluded,
-      memo: b.excluded ? '取り込み対象から外しました（作業用コピーと再開先は保持）' : '取り込み対象に戻しました',
+      memo: b.excluded ? lt('取り込み対象から外しました（作業用コピーと再開先は保持）') : lt('取り込み対象に戻しました'),
     });
     record(b.excluded ? 'mergeexclude' : 'mergeinclude', b);
     return send(res, 200, { ok: true, task: updated });
@@ -1064,32 +1086,32 @@ async function api(req, res, url) {
   if (url.pathname === '/api/task/merge') {
     const p = store.readProject(b.project);
     const file = store.taskFile(b.project, b.task);
-    if (!p || !file) return send(res, 400, { error: '作業が見つかりません' });
+    if (!p || !file) return send(res, 400, { error: lt('作業が見つかりません') });
     const t = store.readTask(file);
-    if(require('./public/project-order').integrators(p,t,store.listProjects()).length) return send(res,409,{error:'親作業の［統合…］で取り込みます。子作業では［成果を渡す］を行ってください'});
-    if (!inWork(p, t)) return send(res, 400, { error: 'この作業には作業用コピーがありません' });
+    if(require('./public/project-order').integrators(p,t,store.listProjects()).length) return send(res,409,{error:lt('親作業の［統合…］で取り込みます。子作業では［成果を渡す］を行ってください')});
+    if (!inWork(p, t)) return send(res, 400, { error: lt('この作業には作業用コピーがありません') });
     if (copyMissing(p, t)) {
       const m = lastMerge(p.id, t.id);
       const when = m ? new Date(m.at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
-      const note = m ? `この作業は ${when} に本体へ取り込み済みです（作業用コピーはゴミ箱へ移してあります）。` : '作業用コピーの場所が見つかりません（消えたか、別の場所に移っています）。';
-      store.updateTask(p.id, t.id, { workdir: '', memo: `${note} 作業ファイルの古い記録を片付けました` });
+      const note = m ? lt`この作業は ${when} に本体へ取り込み済みです（作業用コピーはゴミ箱へ移してあります）。` : lt('作業用コピーの場所が見つかりません（消えたか、別の場所に移っています）。');
+      store.updateTask(p.id, t.id, { workdir: '', memo: lt`${note} 作業ファイルの古い記録を片付けました` });
       record('mergeskip', b, { merged: Boolean(m) });
-      return send(res, 409, { error: `${note} 変更は本体に入っています。作業ファイルの古い記録を片付けたので、続きは本体でそのまま始められます` });
+      return send(res, 409, { error: lt`${note} 変更は本体に入っています。作業ファイルの古い記録を片付けたので、続きは本体でそのまま始められます` });
     }
-    if (t.mergeExcluded) return send(res, 409, { error: '取り込み対象から外されています。先に［取り込み対象に戻す］を選んでください' });
-    if (removal.busy(p.id, t.id) || maintenance.locked(p.id)) return send(res, 409, { error: 'AI・整理・確認が動いています。この返事が終わってから取り込んでください' });
+    if (t.mergeExcluded) return send(res, 409, { error: lt('取り込み対象から外されています。先に［取り込み対象に戻す］を選んでください') });
+    if (removal.busy(p.id, t.id) || maintenance.locked(p.id)) return send(res, 409, { error: lt('AI・整理・確認が動いています。この返事が終わってから取り込んでください') });
     let r;
     try { r = gitw.merge({ dir: expandHome(t.workdir), workRoot: workRoot(p), title: `${t.id} ${t.title}` }); }
     catch (e) { r = { ok: false, error: String(e.message || e).split('\n')[0] }; }
     record('merge', b, { ok: Boolean(r.ok), conflict: Boolean(r.conflict), ...(r.ok ? {main:r.main,commit:r.commit,files:r.files} : {}) });
     if (r.conflict) {
-      store.updateTask(p.id, t.id, { state: '返事待ち', question: '本体に取り込む時にぶつかりました。AI を始めて「本体の最新を取り込み、ぶつかった所を直して」と頼んでから、もう一度［本体に取り込む］を押してください' });
+      store.updateTask(p.id, t.id, { state: '返事待ち', question: lt('本体に取り込む時にぶつかりました。AI を始めて「本体の最新を取り込み、ぶつかった所を直して」と頼んでから、もう一度［本体に取り込む］を押してください') });
       return send(res, 409, { error: r.error, conflict: true });
     }
     if (!r.ok) return send(res, 400, { error: r.error });
     for (const a of launch.AIS) sessions.stop(b.project, b.task, a);
-    const done = store.updateTask(p.id, t.id, { workdir: '', state: '完了', question: '', memo: `本体に取り込み、作業用コピーをゴミ箱へ移しました（${r.main}）` });
-    try { store.appendSection(p.id, t.id, 'やったこと', `- ${new Date().toISOString().slice(0, 16).replace('T', ' ')} 本体に取り込み済み（${r.main}）。作業用コピーはゴミ箱へ。workdir は空のままにすること`); } catch (e) { /* 無くてもよい */ }
+    const done = store.updateTask(p.id, t.id, { workdir: '', state: '完了', question: '', memo: lt`本体に取り込み、作業用コピーをゴミ箱へ移しました（${r.main}）` });
+    try { store.appendSection(p.id, t.id, 'やったこと', lt`- ${new Date().toISOString().slice(0, 16).replace('T', ' ')} 本体に取り込み済み（${r.main}）。作業用コピーはゴミ箱へ。workdir は空のままにすること`); } catch (e) { /* 無くてもよい */ }
     return send(res, 200, { ok: true, main: r.main, trashed: r.trashed, task: done });
   }
   // 成果ファイルを選び、保存と受領通知の後に子作業・派生を片付ける。
@@ -1116,21 +1138,21 @@ async function api(req, res, url) {
     const file = p && store.taskFile(b.project, b.task);
     const text = typeof b.text === 'string' ? b.text.trim() : '';
     const ai = b.ai === 'claude-code' ? 'claude' : b.ai;
-    if (!p || !file || !launch.AIS.includes(ai)) return send(res, 400, { error: 'project・task・ai（codex / claude / agy）を確かめてください' });
-    if (!text || text.length > 8000) return send(res, 400, { error: 'text は1〜8000文字' });
-    if (aiTools.isOperating()) return send(res, 409, { error: 'AI の更新・モデル再取得が進行中です' });
+    if (!p || !file || !launch.AIS.includes(ai)) return send(res, 400, { error: lt('project・task・ai（codex / claude / agy）を確かめてください') });
+    if (!text || text.length > 8000) return send(res, 400, { error: lt('text は1〜8000文字') });
+    if (aiTools.isOperating()) return send(res, 409, { error: lt('AI の更新・モデル再取得が進行中です') });
     const t = store.readTask(file);
-    const sizeNote = text.length > 1500 ? ' Hub が付ける内容を除き、差分だけにすると短くなります' : '';
-    const title = String(b.title || text.split('\n')[0]).trim().slice(0, 60) || '渡した作業';
+    const sizeNote = text.length > 1500 ? lt(' Hub が付ける内容を除き、差分だけにすると短くなります') : '';
+    const title = String(b.title || text.split('\n')[0]).trim().slice(0, 60) || lt('渡した作業');
     if (t.state === '完了') return send(res, 409, { error: DELEGATE_COMPLETED_ERROR });
     // 委任先の役割は元の担当と異なることがある。親の role/model や CLI の既定へは戻さない。
     const role = b.role && rolesData().roles.find(r => r.name === b.role);
-    if (b.role && (!role || role.main.ai !== launch.AI_KEY[ai])) return send(res, 400, { error: 'role は指定した AI が主担当の役割を選んでください' });
+    if (b.role && (!role || role.main.ai !== launch.AI_KEY[ai])) return send(res, 400, { error: lt('role は指定した AI が主担当の役割を選んでください') });
     const model = launch.modelLabel(ai, typeof b.model === 'string' ? b.model.trim() : role?.main.model || '');
-    if (!model) return send(res, 400, { error: 'model 又は role を明示してください。例：チェックは ai: claude・model: claude-fable-5-1、書込は ai: codex・model: gpt-6.1-sol。作業は増やしていません' });
+    if (!model) return send(res, 400, { error: lt('model 又は role を明示してください。例：チェックは ai: claude・model: claude-fable-5-1、書込は ai: codex・model: gpt-6.1-sol。作業は増やしていません') });
     const invalid = modelError(ai, model);
     if (invalid) return send(res, 409, { error: invalid });
-    if (!launch.flagFor(ai, model)) return send(res, 409, { error: '委任には CLI に渡すモデル名が必要です。指定なしでは起動しません' });
+    if (!launch.flagFor(ai, model)) return send(res, 409, { error: lt('委任には CLI に渡すモデル名が必要です。指定なしでは起動しません') });
     const terminalError = delegateTerminalError(p.id, t.id);
     if (terminalError) return send(res, 409, { error: terminalError });
     const sourceTurn = chats.busy(p.id, t.id)?.userRow?.turn || null;
@@ -1138,40 +1160,40 @@ async function api(req, res, url) {
     let dir;
     try { ({ dir } = startDir(p, t, busy)); } catch (e) { return send(res, 409, { error: String(e.message || e) }); }
     const effort = ai === 'agy' ? '高' : roles.EFFORTS.includes(b.effort) ? b.effort : role?.main.effort || '';
-    const shown = `【渡した依頼：${title}】\n${text}`;
-    const request = { ai, model, effort, sourceTurn, role: b.role || '', requireModel: true, requiredModel: launch.flagFor(ai, model), shown, text: shown + '\n\n新しい作業・子作業を作らず、この既存作業で依頼を行い、結果をこの会話へ返してください。', perm: permCmd(ai) };
+    const shown = lt`【渡した依頼：${title}】\n${text}`;
+    const request = { ai, model, effort, sourceTurn, role: b.role || '', requireModel: true, requiredModel: launch.flagFor(ai, model), shown, text: shown + lt('\n\n新しい作業・子作業を作らず、この既存作業で依頼を行い、結果をこの会話へ返してください。'), perm: permCmd(ai) };
     const enqueue = () => {
       const item = chats.enqueue(p.id, t.id, request);
       record('delegate', { project: p.id, task: t.id, ai }, { title, model, effort, queued: true, id: item.id, sourceTurn });
-      return send(res, 200, { ok: true, project: p.id, task: t.id, title, model, effort, queued: true, id: item.id, queue: chats.queue(p.id, t.id).length, note: (chats.busy(p.id, t.id) ? '今の AI が終わったら、同じ作業で指定の AI が始まります。開始時に上限継続を確かめた時は Astra で始めます。この番を終えてください' : '同じ作業の順番待ちに追加しました。画面の［始める］で再開できます') + sizeNote });
+      return send(res, 200, { ok: true, project: p.id, task: t.id, title, model, effort, queued: true, id: item.id, queue: chats.queue(p.id, t.id).length, note: (chats.busy(p.id, t.id) ? lt('今の AI が終わったら、同じ作業で指定の AI が始まります。開始時に上限継続を確かめた時は Astra で始めます。この番を終えてください') : lt('同じ作業の順番待ちに追加しました。画面の［始める］で再開できます')) + sizeNote });
     };
     if (busy || chats.queue(p.id, t.id).length) return enqueue();
-    const basePrompt = taskPrompt(p, t, file, dir) + ' 同じ作業で担当 AI から渡された依頼です。結果と残った課題をこの会話へ返してください。';
+    const basePrompt = taskPrompt(p, t, file, dir) + lt(' 同じ作業で担当 AI から渡された依頼です。結果と残った課題をこの会話へ返してください。');
     const onEnd = row => {
-      if (row.asks && row.asks.length) store.updateTask(p.id, t.id, { state: '返事待ち', question: row.asks.map(a => a.question).filter(Boolean).join(' / ').slice(0, 300) || '選んでください' });
+      if (row.asks && row.asks.length) store.updateTask(p.id, t.id, { state: '返事待ち', question: row.asks.map(a => a.question).filter(Boolean).join(' / ').slice(0, 300) || lt('選んでください') });
       chatEnded(p.id, t.id);
       record('delegateend', { project: p.id, task: t.id, ai: row.ai }, { title, model: row.model, error: Boolean(row.error) });
     };
     try {
       const stopVersion = chats.stops.get(chats.key(p.id, t.id)) || 0;
       await refreshLimitEvidence(request);
-      if ((chats.stops.get(chats.key(p.id, t.id)) || 0) !== stopVersion) throw Error('利用上限の確認中に停止されたため、委任を開始していません');
+      if ((chats.stops.get(chats.key(p.id, t.id)) || 0) !== stopVersion) throw Error(lt('利用上限の確認中に停止されたため、委任を開始していません'));
       const terminalError = delegateTerminalError(p.id, t.id);
       if (terminalError) throw Error(terminalError);
       // 状態要求を待つ間に他の依頼が始まった場合も同じ待ち順へ入れる。
       if (chats.busy(p.id, t.id) || chats.queue(p.id, t.id).length) return enqueue();
       const r = chats.send({ ...request, project: p.id, task: t.id, pdir: p.dir, dir, basePrompt, policy: modelPolicy(p, t), onEnd });
-      if (!(await r.started)) throw Error('AIを起動できませんでした。CLIの導入状態を確認してください。作業の状態と質問は変更していません');
+      if (!(await r.started)) throw Error(lt('AIを起動できませんでした。CLIの導入状態を確認してください。作業の状態と質問は変更していません'));
       store.updateTask(p.id, t.id, { state: '実行中', question: '' });
       record('delegate', { project: p.id, task: t.id, ai: r.ai }, { title, model: r.model, effort: r.effort, queued: false, preflight: Boolean(r.limitSwitch?.preflight), sourceTurn, receivedTurn: r.userRow.turn });
-      return send(res, 200, { ok: true, project: p.id, task: t.id, title, ai: r.ai, model: r.model, effort: r.effort, queued: false, resume: r.resume, note: `${r.limitSwitch?.preflight ? 'Fable上限保持中のため Astra で開始しました。' : ''}同じ作業で ${launch.AI_LABEL[r.ai]}・${r.model} が作業中です。結果もこの会話へ届きます` + sizeNote });
+      return send(res, 200, { ok: true, project: p.id, task: t.id, title, ai: r.ai, model: r.model, effort: r.effort, queued: false, resume: r.resume, note: lt`${r.limitSwitch?.preflight ? lt('Fable上限保持中のため Astra で開始しました。') : ''}同じ作業で ${launch.AI_LABEL[r.ai]}・${r.model} が作業中です。結果もこの会話へ届きます` + sizeNote });
     } catch (e) { return send(res, 409, { error: String(e.message || e) }); }
   }
   // 会話に「人の依頼」を残すだけ（ChatGPT アプリに貼って頼んだ時など、Hub では AI を動かさない）
   if (url.pathname === '/api/chat/note') {
     const p = store.readProject(b.project), file = p && store.taskFile(b.project, b.task);
     const text = typeof b.text === 'string' ? b.text.trim() : '';
-    if (!file || !text || text.length > 8000) return send(res, 400, { error: '作業と依頼を確かめてください' });
+    if (!file || !text || text.length > 8000) return send(res, 400, { error: lt('作業と依頼を確かめてください') });
     const row = chat.append(p.dir, b.task, { role: 'user', text, to: String(b.to || '').slice(0, 20) });
     chats.emit(p.id, b.task, { type: 'row', row });
     return send(res, 200, { ok: true });
@@ -1179,13 +1201,13 @@ async function api(req, res, url) {
   if (url.pathname === '/api/chat/send') {
     // 待っている指示を今すぐ始める（再起動の後など、作業中でない時）
     const fromQueue = b.fromQueue ? chats.queue(b.project, b.task).find(x => x.id === String(b.fromQueue)) : null;
-    if (b.fromQueue && !fromQueue) return send(res, 404, { error: 'その指示はもう待っていません' });
+    if (b.fromQueue && !fromQueue) return send(res, 404, { error: lt('その指示はもう待っていません') });
     if (fromQueue) Object.assign(b, { ai: fromQueue.ai, model: fromQueue.model, effort: fromQueue.effort, text: fromQueue.text, mode: '' });
     const p = store.readProject(b.project);
     const file = store.taskFile(b.project, b.task);
     const text = typeof b.text === 'string' ? b.text.trim() : '';
-    if (!p || !file || !launch.AIS.includes(b.ai)) return send(res, 400, { error: '作業が見つかりません' });
-    if (!text) return send(res, 400, { error: '依頼を書いてください' });
+    if (!p || !file || !launch.AIS.includes(b.ai)) return send(res, 400, { error: lt('作業が見つかりません') });
+    if (!text) return send(res, 400, { error: lt('依頼を書いてください') });
     const t = store.readTask(file);
     const delegated = Boolean(fromQueue?.requireModel);
     if (delegated && t.state === '完了') return send(res, 409, { error: DELEGATE_COMPLETED_ERROR });
@@ -1193,14 +1215,14 @@ async function api(req, res, url) {
     // redo: 取り消してやり直す ／ amend: 追加説明（一緒にやる）／ queue: 終わったら次に（interrupt は前の呼び名）
     const want = b.mode === 'interrupt' ? 'redo' : b.mode;
     const mode = busy ? (['redo', 'amend', 'queue'].includes(want) ? want : '') : '';
-    if (busy && !mode) return send(res, 409, { error: 'まだ作業中です。［取り消してやり直す］［追加説明（一緒にやる）］［終わったら次に］から選んでください' });
+    if (busy && !mode) return send(res, 409, { error: lt('まだ作業中です。［取り消してやり直す］［追加説明（一緒にやる）］［終わったら次に］から選んでください') });
     const spec = pickSpec(t, b.ai);
     const model = launch.modelLabel(b.ai, b.model || spec.model);
     const invalidModel = modelError(b.ai, model);
     if (invalidModel) return send(res, 409, { error: invalidModel });
     const { dir, note } = startDir(p, t, Boolean(mode));
     const effort = b.ai === 'agy' ? '高' : roles.EFFORTS.includes(b.effort) ? b.effort : spec.effort;
-    const basePrompt = taskPrompt(p, t, file, dir) + ' ここは会話画面。人からの依頼に答え、区切りで作業ファイルを更新すること。';
+    const basePrompt = taskPrompt(p, t, file, dir) + lt(' ここは会話画面。人からの依頼に答え、区切りで作業ファイルを更新すること。');
     // 受付時の質問だけを消す。起動待ち中に来た新しい質問には触れない。
     const answerQuestion = typeof b.answerQuestion === 'string' ? b.answerQuestion : t.question;
     const acceptAnswer = () => {
@@ -1223,14 +1245,14 @@ async function api(req, res, url) {
       await chats.stop(p.id, t.id, { interrupting: true });
       record(mode === 'redo' ? 'chatredo' : 'chatamend', { project: p.id, task: t.id, ai: b.ai });
       sendText = mode === 'redo'
-        ? `（人が前の指示「${prev}」を取り消しました。途中で変えたファイルがあれば、必要に応じて元に戻してから、この新しい指示だけを行ってください）\n${text}`
-        : `（人が追加の説明を送りました。今の指示「${prev}」は取り消さずに続けてください。途中までの作業を活かし、この追加説明も合わせて行ってください）\n${text}`;
+        ? lt`（人が前の指示「${prev}」を取り消しました。途中で変えたファイルがあれば、必要に応じて元に戻してから、この新しい指示だけを行ってください）\n${text}`
+        : lt`（人が追加の説明を送りました。今の指示「${prev}」は取り消さずに続けてください。途中までの作業を活かし、この追加説明も合わせて行ってください）\n${text}`;
     }
     try {
       // 答えを送ったら、AI からの質問は済んだことにする
       // 質問は spawn の成功後にだけ解除する。
       // AI が質問して終わったら「あなたの番」にする（左の丸が黄色になる）
-      const onEnd = row => { if (row.asks && row.asks.length) store.updateTask(p.id, t.id, { state: '返事待ち', question: row.asks.map(a => a.question).filter(Boolean).join(' / ').slice(0, 300) || '選んでください' }); chatEnded(p.id, t.id); };
+      const onEnd = row => { if (row.asks && row.asks.length) store.updateTask(p.id, t.id, { state: '返事待ち', question: row.asks.map(a => a.question).filter(Boolean).join(' / ').slice(0, 300) || lt('選んでください') }); chatEnded(p.id, t.id); };
       let replacement;
       if (busy?.pending && (mode === 'redo' || mode === 'amend')) {
         replacement = chats.replacePending(p.id, t.id, text, mode);
@@ -1239,7 +1261,7 @@ async function api(req, res, url) {
       const r = replacement
         ? await chats.sendQueued(replacement.options)
         : await (fromQueue ? chats.sendQueued.bind(chats) : chats.send.bind(chats))({ project: p.id, task: t.id, pdir: p.dir, dir, ai: b.ai, model, effort, role: fromQueue ? fromQueue.role || '' : t.role, limitSwitch: fromQueue?.limitSwitch, request: fromQueue?.id, requireModel: Boolean(fromQueue?.requireModel), requiredModel: fromQueue?.requiredModel, text: sendText, shown: fromQueue?.shown || text, mode: mode || (fromQueue ? 'queued' : undefined), basePrompt, policy: modelPolicy(p, t), perm: permCmd(b.ai), onEnd });
-      if (!(await r.started)) throw Error('AIを起動できませんでした。CLIの導入状態を確認してください。作業の状態と質問は変更していません');
+      if (!(await r.started)) throw Error(lt('AIを起動できませんでした。CLIの導入状態を確認してください。作業の状態と質問は変更していません'));
       const answeredQuestion = delegated ? null : acceptAnswer();
       if (delegated) {
         store.updateTask(p.id, t.id, { state: '実行中', question: '' });
@@ -1250,12 +1272,12 @@ async function api(req, res, url) {
         record(mode === 'redo' ? 'chatredo' : 'chatamend', { project: p.id, task: t.id, ai: r.ai });
       }
       record('chat', { project: p.id, task: t.id, ai: r.ai }, { model: r.model, effort: r.effort, resume: r.resume });
-      return send(res, 200, { ok: true, model: r.model, effort: r.effort, note: r.limitSwitch?.preflight ? 'Fable上限保持中のため Astra で開始しました。' : note, resume: r.resume, answeredQuestion });
+      return send(res, 200, { ok: true, model: r.model, effort: r.effort, note: r.limitSwitch?.preflight ? lt('Fable上限保持中のため Astra で開始しました。') : note, resume: r.resume, answeredQuestion });
     } catch (e) { return send(res, 409, { error: String(e.message || e) }); }
   }
   // 未読の印を消す（画面が作業を開いた時）
   if (url.pathname === '/api/task/read') {
-    if (typeof b.project !== 'string' || typeof b.task !== 'string') return send(res, 400, { error: '作業が見つかりません' });
+    if (typeof b.project !== 'string' || typeof b.task !== 'string') return send(res, 400, { error: lt('作業が見つかりません') });
     setUnread(b.project, b.task, false);
     return send(res, 200, { ok: true });
   }
@@ -1272,18 +1294,20 @@ async function api(req, res, url) {
   // 新しい版にする：本体を起動し直す（動いている AI があれば断る。止まってしまうため）
   // 本体を止める（アプリが、許可のある自分から起動し直すため）。AI が動いている間は断る
   if (url.pathname === '/api/quit') {
-    if (aiTools.isOperating()) return send(res, 409, { error: 'AI の更新・モデル再取得が進行中です' });
+    if (updateBusy()) return send(res, 409, { error: appUpdate.idleMessage() });
+    if (aiTools.isOperating()) return send(res, 409, { error: lt('AI の更新・モデル再取得が進行中です') });
     const busy = sessions.list().filter(x => x.running).length + chats.running.size;
-    if (busy) return send(res, 409, { error: `動いている AI が ${busy} つあります` });
+    if (busy) return send(res, 409, { error: lt`動いている AI が ${busy} つあります` });
     record('quit', {}, { reason: String(b.reason || '') });
     send(res, 200, { ok: true });
     if (!DRY) setTimeout(shutdown, 200);
     return undefined;
   }
   if (url.pathname === '/api/restart') {
-    if (aiTools.isOperating()) return send(res, 409, { error: 'AI の更新・モデル再取得が進行中です' });
+    if (updateBusy()) return send(res, 409, { error: appUpdate.idleMessage() });
+    if (aiTools.isOperating()) return send(res, 409, { error: lt('AI の更新・モデル再取得が進行中です') });
     const busy = sessions.list().filter(x => x.running).length + chats.running.size;
-    if (busy) return send(res, 409, { error: `動いている AI が ${busy} つあります。止めてから（または返事が終わってから）押してください` });
+    if (busy) return send(res, 409, { error: lt`動いている AI が ${busy} つあります。止めてから（または返事が終わってから）押してください` });
     record('restart', {}, { from: VERSION, to: readVersion() });
     send(res, 200, { ok: true, from: VERSION, to: readVersion() });
     if (DRY) return undefined;
@@ -1291,7 +1315,8 @@ async function api(req, res, url) {
       server.close();
       const { spawn } = require('child_process');
       // 同じ設定で新しい本体を起動してから、この本体は終わる（新しい方は待ち受けが空くまで少し待つ）
-      const child = spawn(process.execPath, [path.join(__dirname, 'server.js')], { cwd: __dirname, env: { ...process.env, HUB_RESTART_WAIT: '1' }, detached: true, stdio: ['ignore', 'inherit', 'inherit'] });
+      const nextHub = appUpdate.restartNeeded ? path.join(appUpdate.source, 'hub') : __dirname;
+      const child = spawn(process.execPath, [path.join(nextHub, 'server.js')], { cwd: nextHub, env: { ...process.env, HUB_UPDATE_SOURCE: appUpdate.source, HUB_RESTART_WAIT: '1' }, detached: true, stdio: ['ignore', 'inherit', 'inherit'] });
       child.unref();
       process.exit(0);
     }, 200);
@@ -1310,7 +1335,7 @@ async function api(req, res, url) {
   if (url.pathname === '/api/pick-folder') {
     if (DRY) return send(res, 200, { path: '' });
     const { execFile } = require('child_process');
-    execFile('osascript', ['-e', `POSIX path of (choose folder with prompt "${String(b.prompt || 'フォルダを選んでください').replace(/["\\]/g, '')}")`], (err, out) => {
+    execFile('osascript', ['-e', `POSIX path of (choose folder with prompt "${String(b.prompt || lt('フォルダを選んでください')).replace(/["\\]/g, '')}")`], (err, out) => {
       if (err) return send(res, 200, { path: '' }); // 取り消した時
       return send(res, 200, { path: String(out).trim().replace(/\/$/, '') });
     });
@@ -1321,9 +1346,9 @@ async function api(req, res, url) {
     const p = store.readProject(b.project);
     const file = p && store.taskFile(p.id, b.task);
     const paths = (Array.isArray(b.paths) ? b.paths : []).map(x => String(x)).filter(x => path.isAbsolute(x) && fs.existsSync(x)).slice(0, 20);
-    if (!file) return send(res, 400, { error: '作業が見つかりません' });
-    if (!paths.length) return send(res, 400, { error: 'ファイルが見つかりません' });
-    store.updateTask(p.id, b.task, { memo: `ファイルを渡した: ${paths.join(' , ')}` });
+    if (!file) return send(res, 400, { error: lt('作業が見つかりません') });
+    if (!paths.length) return send(res, 400, { error: lt('ファイルが見つかりません') });
+    store.updateTask(p.id, b.task, { memo: lt`ファイルを渡した: ${paths.join(' , ')}` });
     const ai = launch.AIS.includes(b.ai) ? b.ai : '';
     const typed = ai ? sessions.write(p.id, b.task, ai, paths.map(x => (/\s/.test(x) ? `"${x}"` : x)).join(' ') + ' ') : false;
     record('upload', { project: p.id, task: b.task, ai }, { file: paths.join(' , ') });
@@ -1333,9 +1358,9 @@ async function api(req, res, url) {
   // 参考フォルダ・ファイルを足す（作った後のプロジェクトにも）
   if (url.pathname === '/api/project/refs') {
     const paths = (Array.isArray(b.paths) ? b.paths : []).map(x => expandHome(String(x))).filter(x => path.isAbsolute(x) && fs.existsSync(x)).slice(0, 30);
-    if (!paths.length) return send(res, 400, { error: 'フォルダが見つかりません' });
+    if (!paths.length) return send(res, 400, { error: lt('フォルダが見つかりません') });
     const r = store.addRefs(b.project, paths);
-    if (!r) return send(res, 400, { error: 'プロジェクトが見つかりません' });
+    if (!r) return send(res, 400, { error: lt('プロジェクトが見つかりません') });
     record('refs', { project: b.project }, { paths: paths.join(' , ') });
     return send(res, 200, { ok: true, added: r.added, folders: r.project.folders });
   }
@@ -1367,7 +1392,7 @@ async function api(req, res, url) {
       else if (url.pathname === '/api/maintenance/apply') {result=maintenance.apply(b.project,b.token,b.selected,b.confirm);record('cleanup', {project:b.project}, {transaction:result.id,moved:result.moved});}
       else if (url.pathname === '/api/maintenance/restore') {result=maintenance.restore(b.project,b.transaction,b.confirm);record('restore',{project:b.project},{transaction:b.transaction});}
       else if (url.pathname === '/api/maintenance/verify') {result=await maintenance.verify(b.project,b.script,b.expectedHash,b.confirm);record('verify',{project:b.project},{ok:result.ok,script:b.script});}
-      else return send(res,404,{error:'操作が見つかりません'});
+      else return send(res,404,{error:lt('操作が見つかりません')});
       return send(res,200,result);
     } catch(e) {return send(res,409,{error:e.message});}
   }
@@ -1394,10 +1419,10 @@ async function api(req, res, url) {
   }
   if (url.pathname === '/api/project/new') {
     const body = expandHome(b.body || '');
-    if (body && !fs.existsSync(body)) return send(res, 400, { error: `本体のフォルダが見つかりません: ${body}` });
-    if (body && !fs.statSync(body).isDirectory()) return send(res, 400, { error: `フォルダではありません（ファイルです）: ${body}` });
+    if (body && !fs.existsSync(body)) return send(res, 400, { error: lt`本体のフォルダが見つかりません: ${body}` });
+    if (body && !fs.statSync(body).isDirectory()) return send(res, 400, { error: lt`フォルダではありません（ファイルです）: ${body}` });
     const refs = (Array.isArray(b.refs) ? b.refs : []).map(x => expandHome(String(x))).filter(x => path.isAbsolute(x) && fs.existsSync(x));
-    const r = store.createProject({ ...b, body, refs }, path.join(__dirname, '..', 'docs', 'project-hub', 'templates', 'project'));
+    const r = store.createProject({ ...b, body, refs }, path.join(__dirname, '..', 'docs', 'project-hub', 'templates', ...(locale() === 'zh-TW' ? ['zh-TW'] : []), 'project'));
     if (r.error) return send(res, 400, { error: r.error });
     record('newproject', { project: r.project.id });
     return send(res, 200, r.project);
@@ -1405,12 +1430,12 @@ async function api(req, res, url) {
   if (url.pathname === '/api/task/new') {
     const t = store.createTask(b.project, b);
     if (t) record('newtask', { project: b.project, task: t.id }, { title: t.title });
-    return t ? send(res, 200, t) : send(res, 400, { error: '作業名・親作業・派生元を確認してください' });
+    return t ? send(res, 200, t) : send(res, 400, { error: lt('作業名・親作業・派生元を確認してください') });
   }
 
   // 選ぶ欄にモデルを出す・出さない
   if (url.pathname === '/api/models/hidden') {
-    if (!['claude-code', 'codex', 'agy'].includes(b.ai) || typeof b.model !== 'string' || !b.model) return send(res, 400, { error: '形式が違います' });
+    if (!['claude-code', 'codex', 'agy'].includes(b.ai) || typeof b.model !== 'string' || !b.model) return send(res, 400, { error: lt('形式が違います') });
     return send(res, 200, { ok: true, ...modelView.setHidden(b.ai, b.model, Boolean(b.hidden)) });
   }
   if (url.pathname === '/api/models/initial') {
@@ -1436,7 +1461,7 @@ async function api(req, res, url) {
   }
   // 役割分担の保存
   if (url.pathname === '/api/roles') {
-    if (!Array.isArray(b.roles)) return send(res, 400, { error: '形式が違います' });
+    if (!Array.isArray(b.roles)) return send(res, 400, { error: lt('形式が違います') });
     const r = roles.write(ROLES_FILE, b.roles);
     return r.ok ? send(res, 200, r.data) : send(res, 400, { error: r.errors.join(' / ') });
   }
@@ -1445,6 +1470,7 @@ async function api(req, res, url) {
 }
 
 function serveStatic(res, pathname) {
+  if (pathname === '/locale-config.js') return send(res, 200, configScript(), TYPES['.js']);
   const rel = pathname === '/' ? 'index.html' : pathname.slice(1);
   const file = path.normalize(path.join(PUBLIC, rel));
   if (!file.startsWith(PUBLIC + path.sep)) return send(res, 403, 'forbidden', 'text/plain');
@@ -1457,7 +1483,7 @@ function serveStatic(res, pathname) {
 // 外から（tailscale serve 越し）の要求：オフなら断る。オンなら合言葉で入った札が要る
 async function remoteGate(req, res, url) {
   const isApi = url.pathname.startsWith('/api/');
-  if (!remote.enabled()) return isApi ? send(res, 403, { error: '外からの利用はオフです' }) : send(res, 403, remoteLib.offPage(), 'text/html; charset=utf-8');
+  if (!remote.enabled()) return isApi ? send(res, 403, { error: lt('外からの利用はオフです') }) : send(res, 403, remoteLib.offPage(), 'text/html; charset=utf-8');
   remote.noteHost(req.headers['x-forwarded-host'] || req.headers.host);
   // 書き換える操作は、この画面から送った物だけ（ほかのサイトから送らせない）
   if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -1466,7 +1492,7 @@ async function remoteGate(req, res, url) {
   }
   if (req.method === 'GET' && url.pathname === '/login') return send(res, 200, remoteLib.loginPage(), 'text/html; charset=utf-8');
   if (req.method === 'POST' && url.pathname === '/api/login') {
-    let b; try { b = await readBody(req); } catch (e) { return send(res, 400, { error: '形式が違います' }); }
+    let b; try { b = await readBody(req); } catch (e) { return send(res, 400, { error: lt('形式が違います') }); }
     const who = remoteLib.whoOf(req), r = remote.login(b.passcode, who, req.headers['user-agent']);
     record('remotelogin', {}, { ok: Boolean(r.ok), who });
     if (!r.ok) return send(res, r.status, { error: r.error });
@@ -1475,7 +1501,7 @@ async function remoteGate(req, res, url) {
   }
   const token = remoteLib.cookieOf(req);
   if (!remote.check(token)) {
-    if (isApi) return send(res, 401, { error: 'ログインしてください', login: true });
+    if (isApi) return send(res, 401, { error: lt('ログインしてください'), login: true });
     res.writeHead(302, { Location: '/login', 'Cache-Control': 'no-store' }); return res.end();
   }
   if (req.method === 'POST' && url.pathname === '/api/logout') {
@@ -1501,22 +1527,22 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-function shutdown() { procwatch.stop(); sessions.stopAll(); chats.stopAll(); server.close(); process.exit(0); }
+function shutdown() { appUpdate.stop(); procwatch.stop(); sessions.stopAll(); chats.stopAll(); server.close(); process.exit(0); }
 
 if (require.main === module) {
   // 新しい版に切り替える時は、前の本体が待ち受けを空けるまで少し待つ
   let tries = 0;
   server.on('error', e => {
     if (e.code === 'EADDRINUSE' && process.env.HUB_RESTART_WAIT && tries++ < 50) return setTimeout(() => server.listen(PORT, '127.0.0.1'), 200);
-    console.error(e.code === 'EADDRINUSE' ? `ポート ${PORT} は使われています（もう起動しているかもしれません）` : e);
+    console.error(e.code === 'EADDRINUSE' ? lt`ポート ${PORT} は使われています（もう起動しているかもしれません）` : e);
     process.exit(1);
   });
   server.listen(PORT, '127.0.0.1', () => {
     console.log(`Project Hub ${VERSION}`);
-    console.log(`Project Hub: http://127.0.0.1:${PORT}  （台帳の場所: ${ROOT}）`);
-    console.log(sessions.available() ? '作業画面: 使えます' : '作業画面: 部品（node-pty）が未設定。setup.sh を実行してください');
-    console.log('止める時は、この窓で Control + C');
-    if (!DRY) procwatch.start();
+    console.log(lt`Project Hub: http://127.0.0.1:${PORT}  （台帳の場所: ${ROOT}）`);
+    console.log(sessions.available() ? lt('作業画面: 使えます') : lt('作業画面: 部品（node-pty）が未設定。setup.sh を実行してください'));
+    console.log(lt('止める時は、この窓で Control + C'));
+    if (!DRY) { procwatch.start(); appUpdate.start(); }
   });
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

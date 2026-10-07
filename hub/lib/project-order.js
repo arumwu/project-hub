@@ -1,9 +1,10 @@
 'use strict';
+const { lt } = require("./locale");
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const rules = require('../public/project-order');
-const CHANGED = '並びが変わりました。読み直してから並べ替えてください';
+const CHANGED = lt('並びが変わりました。読み直してから並べ替えてください');
 class ProjectOrder {
   constructor(store) { this.store = store; this.file = path.join(store.root, '_hub', 'project-order.json'); }
   read() {
@@ -24,7 +25,7 @@ class ProjectOrder {
   }
   pin({ project, pinned, before }) {
     const pins = this.readPins();
-    if (!this.store.listProjects().some(p => p.id === project) || typeof pinned !== 'boolean' || typeof before !== 'boolean' || pins.includes(project) !== before) throw Error('固定の状態が変わりました。読み直してから操作してください');
+    if (!this.store.listProjects().some(p => p.id === project) || typeof pinned !== 'boolean' || typeof before !== 'boolean' || pins.includes(project) !== before) throw Error(lt('固定の状態が変わりました。読み直してから操作してください'));
     const next = pins.filter(id => id !== project);
     if (pinned) next.push(project);
     const file = path.join(this.store.root, '_hub', 'project-pins.json');
@@ -41,7 +42,7 @@ class ProjectOrder {
     const current = rules.siblings(all, parent, groups, this.readPins()).map(p => p.id);
     if (JSON.stringify(before) !== JSON.stringify(current) || order.length !== current.length || order.some(id => !current.includes(id))) throw Error(CHANGED);
     const pins = new Set(this.readPins());
-    if (order.some((id, i) => pins.has(id) !== pins.has(current[i]))) throw Error('固定したプロジェクトは上部に置いてください');
+    if (order.some((id, i) => pins.has(id) !== pins.has(current[i]))) throw Error(lt('固定したプロジェクトは上部に置いてください'));
     // 削除した ID の位置は残す。復元時にもその位置を使い、表示中の兄弟だけを入れ替える。
     const active = new Set(current), old = Object.hasOwn(groups, parent) ? groups[parent] : [];
     let i = 0;

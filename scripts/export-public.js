@@ -7,6 +7,7 @@ const root = path.resolve(__dirname, '..');
 const output = path.join(root, 'public-release', 'ProjectHub');
 const publicFiles = new Set([
   'README.md', 'CONTRIBUTING.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
+  'README.zh-TW.md', 'CONTRIBUTING.zh-TW.md', 'THIRD_PARTY_NOTICES.zh-TW.md',
   'scripts/export-public.js', 'scripts/public.gitignore',
 ]);
 const required = [...publicFiles, '.github/ISSUE_TEMPLATE/feedback.md',
@@ -32,15 +33,18 @@ function excluded(name) {
     || /^(?:\.npmrc|\.dev\.vars(?:\..*)?|.*\.log|.*\.(?:pem|key))$/.test(p))) return true;
   // Only the templates and fictional seed may contain ledger metadata.
   if (parts.includes('.ai') && !name.startsWith('docs/project-hub/templates/project/.ai/')
-    && !name.startsWith('hub/seed/')) return true;
+    && !name.startsWith('docs/project-hub/templates/zh-TW/project/.ai/')
+    && !name.startsWith('hub/seed/') && !name.startsWith('hub/seed-zh-TW/')) return true;
   if (/\/\.ai\/(?:chat|handoff|work)(?:\/|$)/.test(name)) return true;
-  if (parts.includes('_hub') && !name.startsWith('docs/project-hub/templates/_hub/')) return true;
+  if (parts.includes('_hub') && !name.startsWith('docs/project-hub/templates/_hub/')
+    && !name.startsWith('docs/project-hub/templates/zh-TW/_hub/')) return true;
   if (name.includes('/.claude/') || name.includes('/.codex/')) return true;
   return false;
 }
 function selected(name, isPublic) {
   return isPublic ? publicFiles.has(name) || name.startsWith('.github/ISSUE_TEMPLATE/')
     || name === '.github/pull_request_template.md'
+    || name.startsWith('.github/PULL_REQUEST_TEMPLATE/') || name.startsWith('.github/workflows/')
     : name.startsWith('hub/') || name.startsWith('docs/project-hub/templates/')
     || /^docs\/screenshots\/[^/]+-redacted\.png$/.test(name);
 }

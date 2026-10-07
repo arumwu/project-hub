@@ -1,4 +1,5 @@
 'use strict';
+const { lt } = require("./locale");
 // 裏で動いている AI（codex / claude / agy）の見張り。チャットの AI が nohup や & で別の CLI を起動して
 // 自分の番を終えると、Hub では終わったように見えるため、ps で探して「裏で作業中」として出す
 const fs = require('fs');
@@ -116,7 +117,7 @@ function create(opts = {}) {
   const cwdCache = new Map(); // "pid:since" → cwd
   const listeners = [];
   let current = [], timer = null, busy = false, lastWarn = 0;
-  const warn = m => { const now = Date.now(); if (now - lastWarn < WARN_EVERY) return; lastWarn = now; log(`[裏の作業の見張り] ${m}`); };
+  const warn = m => { const now = Date.now(); if (now - lastWarn < WARN_EVERY) return; lastWarn = now; log(lt`[裏の作業の見張り] ${m}`); };
 
   async function cwds(rows) {
     const key = r => `${r.pid}:${r.since}`;
@@ -126,7 +127,7 @@ function create(opts = {}) {
         try {
           const found = parseLsof(await exec('lsof', ['-a', '-d', 'cwd', '-p', need.map(r => r.pid).join(','), '-Fpn']));
           for (const r of need) if (found.has(r.pid)) cwdCache.set(key(r), found.get(r.pid));
-        } catch (e) { warn(`lsof が使えません：${String(e.message || e).split('\n')[0]}`); }
+        } catch (e) { warn(lt`lsof が使えません：${String(e.message || e).split('\n')[0]}`); }
       } else {
         for (const r of need) { try { cwdCache.set(key(r), readlink(`/proc/${r.pid}/cwd`)); } catch (e) { /* 他人の物・もう無い */ } }
       }
@@ -142,9 +143,9 @@ function create(opts = {}) {
     try {
       let text;
       try { text = await exec('ps', psArgs(platform)); }
-      catch (e) { warn(`ps が使えません：${String(e.message || e).split('\n')[0]}`); return current; }
+      catch (e) { warn(lt`ps が使えません：${String(e.message || e).split('\n')[0]}`); return current; }
       const rows = parsePs(text);
-      if (!rows.length) { warn('ps の出力を読めませんでした'); return current; }
+      if (!rows.length) { warn(lt('ps の出力を読めませんでした')); return current; }
       const kept = pickAi(rows, selfPid);
       const dirs = kept.length ? await cwds(kept) : [];
       let all = [];
@@ -153,7 +154,7 @@ function create(opts = {}) {
       const before = new Set(current.map(x => x.pid)), after = new Set(next.map(x => x.pid));
       const removed = current.filter(x => !after.has(x.pid)), added = next.filter(x => !before.has(x.pid));
       current = next;
-      if (removed.length || added.length) for (const fn of listeners) { try { fn(current, { added, removed }); } catch (e) { log(`[裏の作業の見張り] ${e.message}`); } }
+      if (removed.length || added.length) for (const fn of listeners) { try { fn(current, { added, removed }); } catch (e) { log(lt`[裏の作業の見張り] ${e.message}`); } }
       return current;
     } catch (e) { warn(String(e.message || e)); return current; }
     finally { busy = false; }
