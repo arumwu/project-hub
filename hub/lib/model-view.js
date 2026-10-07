@@ -1,4 +1,5 @@
 'use strict';
+const { lt } = require("./locale");
 const fs = require('node:fs'), path = require('node:path');
 const order = require('../public/model-order');
 const launch = require('./launch'), { EFFORTS } = require('./roles');
@@ -11,7 +12,7 @@ class ModelView {
     let data;
     try { data = JSON.parse(fs.readFileSync(this.file, 'utf8')); }
     catch (e) { if (e.code === 'ENOENT' || (!strict && e instanceof SyntaxError)) data = {}; else throw e; }
-    if (!data || typeof data !== 'object' || Array.isArray(data)) { if (strict) throw Error('モデルの表示設定の形式が違います'); return {}; }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) { if (strict) throw Error(lt('モデルの表示設定の形式が違います')); return {}; }
     return data;
   }
   hidden(data = this.read()) {
@@ -26,12 +27,12 @@ class ModelView {
     return { labels: p.labels, names };
   }
   setPhone(spec, models) {
-    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return { status: 400, error: 'スマホの表示設定の形式が違います' };
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return { status: 400, error: lt('スマホの表示設定の形式が違います') };
     const keys = Object.keys(spec);
     const mode = keys.length === 1 && keys[0] === 'labels' && ['short', 'full'].includes(spec.labels);
     const name = keys.length === 2 && keys.includes('key') && keys.includes('name') && validPhoneKey(spec.key) && validPhoneName(spec.name)
       && (spec.key === 'chatgpt|app' || order.ordered(models).includes(spec.key));
-    if (!mode && !name) return { status: 400, error: '名前は一覧のモデルを指定し、24字以内・改行なしで入力してください' };
+    if (!mode && !name) return { status: 400, error: lt('名前は一覧のモデルを指定し、24字以内・改行なしで入力してください') };
     const data = this.read(true), phone = this.phone(data);
     if (mode) phone.labels = spec.labels;
     else if (spec.name.trim()) phone.names[spec.key] = spec.name.trim();
@@ -47,9 +48,9 @@ class ModelView {
   }
   setInitial(spec, models, modelError = () => '') {
     if (!spec || !['claude', 'codex'].includes(spec.ai) || typeof spec.model !== 'string' || !EFFORTS.includes(spec.effort))
-      return { status: 400, error: '初期AI・モデル・思考の形式が違います' };
+      return { status: 400, error: lt('初期AI・モデル・思考の形式が違います') };
     const model = launch.modelLabel(spec.ai, spec.model);
-    if (!(models[launch.AI_KEY[spec.ai]] || []).includes(model)) return { status: 400, error: 'このモデルは初期AIに選べません' };
+    if (!(models[launch.AI_KEY[spec.ai]] || []).includes(model)) return { status: 400, error: lt('このモデルは初期AIに選べません') };
     const error = modelError(spec.ai, model);
     if (error) return { status: 400, error };
     const data = this.read(true);
@@ -69,9 +70,9 @@ class ModelView {
     return { hiddenModels: h, modelOrder: this.saved(data) };
   }
   setOrder(next, before, models) {
-    if (!order.valid(next) || !order.valid(before)) return { status: 400, error: '並び順の形式が違います（重複なし・500件まで）' };
+    if (!order.valid(next) || !order.valid(before)) return { status: 400, error: lt('並び順の形式が違います（重複なし・500件まで）') };
     const data = this.read(true);
-    if (JSON.stringify(before) !== JSON.stringify(order.ordered(models, data.order))) return { status: 409, error: '並びが変わりました。読み直してから並べ替えてください' };
+    if (JSON.stringify(before) !== JSON.stringify(order.ordered(models, data.order))) return { status: 409, error: lt('並びが変わりました。読み直してから並べ替えてください') };
     data.order = next.slice(); this.write(data);
     return { modelOrder: this.saved(data), hiddenModels: this.hidden(data) };
   }

@@ -1,4 +1,5 @@
 'use strict';
+const { lt } = require("./locale");
 // 始める欄の画像を手元に保存。元画像を残し、CLI用にPNGへ変換する。
 const fs = require('fs');
 const path = require('path');
@@ -21,12 +22,12 @@ function lastSpec(p) {
 }
 function saveSpec(p, spec) { fs.mkdirSync(path.dirname(specFile(p)), { recursive: true }); fs.writeFileSync(specFile(p), JSON.stringify(spec)); }
 function imageFile(p, id, preview = false) {
-  if (!/^[a-f\d-]{36}\.(png|jpg|jpeg|webp|gif|heic)$/i.test(id)) throw Error('画像の指定が正しくありません');
+  if (!/^[a-f\d-]{36}\.(png|jpg|jpeg|webp|gif|heic)$/i.test(id)) throw Error(lt('画像の指定が正しくありません'));
   return path.join(dirOf(p), preview && !/\.(png|jpe?g)$/i.test(id) ? id + '.png' : id);
 }
 function saveImage(p, name, data) {
-  if (!IMAGE.test(name)) throw Error('画像は png／jpg／jpeg／webp／gif／heic に対応しています');
-  if (!data.length || data.length > MAX) throw Error('画像は1枚50MBまでです');
+  if (!IMAGE.test(name)) throw Error(lt('画像は png／jpg／jpeg／webp／gif／heic に対応しています'));
+  if (!data.length || data.length > MAX) throw Error(lt('画像は1枚50MBまでです'));
   const id = randomUUID() + path.extname(name).toLowerCase();
   const file = imageFile(p, id);
   fs.mkdirSync(dirOf(p), { recursive: true });
@@ -36,23 +37,23 @@ function saveImage(p, name, data) {
     catch {
       // 失敗した一時コピーだけを片付ける。利用者の元画像には触らない。
       for (const temp of [file, imageFile(p, id, true)]) { try { fs.unlinkSync(temp); } catch { /* 未作成 */ } }
-      throw Error('画像をPNGに変換できませんでした。画像を書き出し直して追加してください');
+      throw Error(lt('画像をPNGに変換できませんでした。画像を書き出し直して追加してください'));
     }
   }
-  return { id, name: /^hub-paste-/i.test(path.basename(name)) ? '貼り付け画像.png' : path.basename(name), url: '/api/start/image?project=' + encodeURIComponent(p.id) + '&id=' + id, path: imageFile(p, id, true) };
+  return { id, name: /^hub-paste-/i.test(path.basename(name)) ? lt('貼り付け画像.png') : path.basename(name), url: '/api/start/image?project=' + encodeURIComponent(p.id) + '&id=' + id, path: imageFile(p, id, true) };
 }
 function imageFromPath(p, raw) {
   const file = fs.realpathSync(String(raw));
   const allowed = [os.homedir(), os.tmpdir(), '/private/tmp'].map(x => fs.realpathSync(x));
-  if (!allowed.some(x => file.startsWith(x + path.sep)) || !IMAGE.test(file)) throw Error('この場所の画像は追加できません');
+  if (!allowed.some(x => file.startsWith(x + path.sep)) || !IMAGE.test(file)) throw Error(lt('この場所の画像は追加できません'));
   const stat = fs.statSync(file);
-  if (!stat.isFile() || stat.size > MAX) throw Error('画像は1枚50MBまでです');
+  if (!stat.isFile() || stat.size > MAX) throw Error(lt('画像は1枚50MBまでです'));
   return saveImage(p, path.basename(file), fs.readFileSync(file));
 }
 function copyImages(p, ids, dir, task) {
-  if (!Array.isArray(ids) || ids.length > 10) throw Error('画像は1回10枚までです');
+  if (!Array.isArray(ids) || ids.length > 10) throw Error(lt('画像は1回10枚までです'));
   const sources = ids.map(id => ({ id, file: imageFile(p, id), view: imageFile(p, id, true) }));
-  for (const x of sources) if (!fs.existsSync(x.file) || !fs.existsSync(x.view)) throw Error('添付画像が見つかりません。追加し直してください');
+  for (const x of sources) if (!fs.existsSync(x.file) || !fs.existsSync(x.view)) throw Error(lt('添付画像が見つかりません。追加し直してください'));
   const dest = path.join(dir, 'attachments', task);
   if (ids.length) fs.mkdirSync(dest, { recursive: true });
   return sources.map(x => {
@@ -63,6 +64,6 @@ function copyImages(p, ids, dir, task) {
   });
 }
 function imagePrompt(ai, text, images) {
-  return images.length ? text + '\n\n参照画像（絶対パス）：\n' + images.join('\n') + '\n' + (ai === 'claude' ? 'これらの画像を Read で見てから始める。' : ai === 'agy' ? 'これらの画像を読み、内容を確認してから始める。' : '添付画像を確認してから始める。') : text;
+  return images.length ? text + lt('\n\n参照画像（絶対パス）：\n') + images.join('\n') + '\n' + (ai === 'claude' ? lt('これらの画像を Read で見てから始める。') : ai === 'agy' ? lt('これらの画像を読み、内容を確認してから始める。') : lt('添付画像を確認してから始める。')) : text;
 }
 module.exports = { IMAGE, MAX, lastSpec, saveSpec, imageFile, saveImage, imageFromPath, copyImages, imagePrompt };

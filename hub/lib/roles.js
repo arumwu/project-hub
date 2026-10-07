@@ -1,4 +1,5 @@
 'use strict';
+const { lt } = require("./locale");
 // roles.yaml の読み書き。roles: の中だけを書き換え、それ以外の行（コメントを含む）は残す
 const fs = require('fs');
 const { parseYaml } = require('./frontmatter');
@@ -65,17 +66,17 @@ function fmtSlot(s) {
 function validate(models, roles) {
   const errors = [];
   for (const r of roles) {
-    if (!r.name || /[\n\r{}\[\]:#]/.test(r.name)) errors.push(`役割名が不正です: ${r.name}`);
+    if (!r.name || /[\n\r{}\[\]:#]/.test(r.name)) errors.push(lt`役割名が不正です: ${r.name}`);
     for (const k of ['main', 'backup']) {
       const s = r[k] || {};
-      if (!AIS.includes(s.ai)) errors.push(`${r.name} の ${k}: AI が不正です`);
+      if (!AIS.includes(s.ai)) errors.push(lt`${r.name} の ${k}: AI が不正です`);
       if (s.ai !== '人') {
         const list = models[s.ai] || [];
-        if (!list.includes(s.model)) errors.push(`${r.name} の ${k}: モデル「${s.model}」は ${s.ai} で選べません`);
-        if (!EFFORTS.includes(s.effort)) errors.push(`${r.name} の ${k}: 思考「${s.effort}」は選べません`);
+        if (!list.includes(s.model)) errors.push(lt`${r.name} の ${k}: モデル「${s.model}」は ${s.ai} で選べません`);
+        if (!EFFORTS.includes(s.effort)) errors.push(lt`${r.name} の ${k}: 思考「${s.effort}」は選べません`);
       }
     }
-    if (/[\n\r]/.test(r.job || '')) errors.push(`${r.name} の内容に改行は使えません`);
+    if (/[\n\r]/.test(r.job || '')) errors.push(lt`${r.name} の内容に改行は使えません`);
   }
   return errors;
 }
@@ -129,13 +130,13 @@ function familyOf(name, id) { const m = String(id || '').match(FAMILY) || String
 function tidy(file) {
   const { text, data } = read(file); // data の役割は、今の名前に直したもの
   const changes = [];
-  if (!text) return { ok: false, error: 'roles.yaml がありません', changes };
-  if (!discovered['claude-code'].length && !discovered.codex.length) return { ok: false, error: '先に設定画面の「AI の更新」で［モデル一覧を取り直す］を押してください', changes };
+  if (!text) return { ok: false, error: lt('roles.yaml がありません'), changes };
+  if (!discovered['claude-code'].length && !discovered.codex.length) return { ok: false, error: lt('先に設定画面の「AI の更新」で［モデル一覧を取り直す］を押してください'), changes };
   const raw = parseYaml(text).roles || {};
   const roles = data.roles.map(r => ({ ...r, main: { ...r.main }, backup: { ...r.backup } }));
   for (const r of roles) {
     const before = raw[r.name] || {};
-    for (const [k, slot, orig] of [['いつもの担当', r.main, before.main], ['上限の時', r.backup, before.backup]]) {
+    for (const [k, slot, orig] of [[lt('いつもの担当'), r.main, before.main], [lt('上限の時'), r.backup, before.backup]]) {
       const was = Array.isArray(orig) ? orig[1] || '' : '';
       const list = discovered[slot.ai];
       if (list && list.length && slot.model && !list.some(x => x.label === slot.model)) {

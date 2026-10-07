@@ -1,3 +1,7 @@
+
+// Japanese remains the default when this module is loaded on its own.
+var UI = globalThis.HubI18n || { text: value => value, html: value => value, label: value => value, message: value => value, valueAttribute: () => '', dateLocale: 'ja-JP',
+  template: (strings, ...values) => strings.reduce((out, part, i) => out + part + (i < values.length ? values[i] : ''), '') };
 /* スマホの収納欄。開閉では入力欄を作り直さない。 */
 (() => {
   const $ = s => document.querySelector(s), media = matchMedia('(max-width:720px)');
@@ -7,14 +11,14 @@
     const text = $('#chat-in')?.value || '', images = $('#chat-images');
     const hasDraft = Boolean(text || (images && !images.hidden));
     const button = $('#mobile-compose');
-    if (button) button.textContent = composerOpen ? '閉じる' : '✎ 依頼を書く' + (hasDraft ? ' · 下書きあり' : '');
+    if (button) button.textContent = composerOpen ? UI.text('閉じる') : UI.text('✎ 依頼を書く') + (hasDraft ? UI.text(' · 下書きあり') : '');
   }
   function apply() {
     document.body.classList.toggle('mobile-info-open', infoOpen);
     document.body.classList.toggle('mobile-compose-open', composerOpen);
     const button = $('#mobile-info');
     button.textContent = infoOpen ? '▲' : '▼';
-    button.setAttribute('aria-label', infoOpen ? '情報と操作を閉じる' : '情報と操作を開く');
+    button.setAttribute('aria-label', infoOpen ? UI.text('情報と操作を閉じる') : UI.text('情報と操作を開く'));
     button.setAttribute('aria-expanded', String(infoOpen));
     const compose = $('#mobile-compose');
     if (compose) compose.setAttribute('aria-expanded', String(composerOpen));

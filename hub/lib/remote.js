@@ -1,4 +1,5 @@
 'use strict';
+const { lt, locale } = require('./locale');
 // 外から使う（iPhone）：Tailscale serve 越しの通信を見分け、合言葉でログインさせる
 // 設定は <ROOT>/_hub/remote.json：{ enabled, passcodeHash, salt, host, sessions: [{ id, createdAt, lastSeen, ua }], failures: [{ at, who }] }
 // 札（Cookie）はそのまま保存せず、SHA-256 にした物を id として残す（ファイルが読まれても札にはならない）
@@ -57,21 +58,21 @@ class Remote {
   status() {
     const d = this.prune();
     return { enabled: d.enabled, hasPasscode: Boolean(d.passcodeHash), sessions: d.sessions.map(({ id, createdAt, lastSeen, ua }) => ({ id: id.slice(0, 12), createdAt, lastSeen, ua })),
-      url: d.host ? `https://${d.host}` : '', hint: 'https://<Macの名前>.<tailnet>.ts.net' };
+      url: d.host ? `https://${d.host}` : '', hint: lt('https://<Macの名前>.<tailnet>.ts.net') };
   }
   enabled() { return this.load().enabled; }
   // 設定を変える。合言葉を変えたら、前の合言葉で入った端末はすべて出す
   update({ enabled, passcode }) {
     const d = this.load();
     if (passcode !== undefined) {
-      if (typeof passcode !== 'string' || [...passcode].length < MIN_PASS || passcode.length > 200) return { error: `合言葉は${MIN_PASS}文字以上にしてください` };
+      if (typeof passcode !== 'string' || [...passcode].length < MIN_PASS || passcode.length > 200) return { error: lt`合言葉は${MIN_PASS}文字以上にしてください` };
       d.salt = crypto.randomBytes(16).toString('hex');
       d.passcodeHash = hashOf(passcode, d.salt);
       d.sessions = []; d.failures = [];
     }
     if (enabled !== undefined) {
-      if (typeof enabled !== 'boolean') return { error: '形式が違います' };
-      if (enabled && !d.passcodeHash) return { error: '先に合言葉を決めてください' };
+      if (typeof enabled !== 'boolean') return { error: lt('形式が違います') };
+      if (enabled && !d.passcodeHash) return { error: lt('先に合言葉を決めてください') };
       d.enabled = enabled;
     }
     this.prune(); this.save();
@@ -84,8 +85,8 @@ class Remote {
   // ログイン：成功したら札（token）を返す
   login(passcode, who, ua) {
     const d = this.prune();
-    if (!d.enabled) return { status: 403, error: '外からの利用はオフです' };
-    if (this.locked(who)) return { status: 423, error: '15分待ってください' };
+    if (!d.enabled) return { status: 403, error: lt('外からの利用はオフです') };
+    if (this.locked(who)) return { status: 423, error: lt('15分待ってください') };
     let ok = false;
     if (d.passcodeHash && typeof passcode === 'string' && passcode.length <= 200) {
       const a = Buffer.from(hashOf(passcode, d.salt), 'hex'), b = Buffer.from(d.passcodeHash, 'hex');
@@ -94,7 +95,7 @@ class Remote {
     if (!ok) {
       d.failures.push({ at: this.now(), who });
       this.save();
-      return this.locked(who) ? { status: 423, error: '15分待ってください' } : { status: 401, error: '合言葉が違います' };
+      return this.locked(who) ? { status: 423, error: lt('15分待ってください') } : { status: 401, error: lt('合言葉が違います') };
     }
     const token = crypto.randomBytes(32).toString('base64url'), at = new Date(this.now()).toISOString();
     d.failures = d.failures.filter(f => f.who !== who);
@@ -118,14 +119,14 @@ class Remote {
 
 // 外から見る小さな画面（ログイン・オフの知らせ）。本体の画面とは別に、これだけで動く
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const page = (title, body) => `<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+const page = (title, body) => `<!doctype html><html lang="${locale()}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="apple-mobile-web-app-capable" content="yes"><title>${esc(title)}</title>
 <style>body{font:16px -apple-system,system-ui,sans-serif;margin:0;padding:40px 20px;background:#f6f6f4;color:#222}main{max-width:360px;margin:0 auto}
 h1{font-size:20px}input,button{font:inherit;width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:1px solid #bbb;margin-top:10px}
 button{background:#222;color:#fff;border:0}#msg{color:#b00;min-height:1.5em}@media(prefers-color-scheme:dark){body{background:#1c1c1e;color:#eee}input{background:#2c2c2e;color:#eee;border-color:#555}button{background:#eee;color:#111}}</style></head>
 <body><main>${body}</main></body></html>`;
-const offPage = () => page('Project Hub', '<h1>Project Hub</h1><p>外からの利用はオフです。Mac の Project Hub の設定で「外から使う（iPhone）」をオンにしてください。</p>');
-const loginPage = () => page('Project Hub ログイン', `<h1>Project Hub</h1><p>Mac の設定で決めた合言葉を入れてください。</p>
+const offPage = () => page('Project Hub', lt('<h1>Project Hub</h1><p>外からの利用はオフです。Mac の Project Hub の設定で「外から使う（iPhone）」をオンにしてください。</p>'));
+const loginPage = () => page(lt('Project Hub ログイン'), lt`<h1>Project Hub</h1><p>Mac の設定で決めた合言葉を入れてください。</p>
 <form id="f"><input id="p" type="password" autocomplete="current-password" placeholder="合言葉" required autofocus><button type="submit">ログイン</button></form><p id="msg" role="alert"></p>
 <script>document.getElementById('f').onsubmit=async e=>{e.preventDefault();const m=document.getElementById('msg');m.textContent='';
 try{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json','X-Hub':'1'},body:JSON.stringify({passcode:document.getElementById('p').value})});

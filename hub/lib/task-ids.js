@@ -1,4 +1,5 @@
 'use strict';
+const { lt } = require("./locale");
 // 作業番号は片付け・復元後も再利用しない。旧版の成果・履歴も予約に取り込む。
 const fs = require('node:fs'), path = require('node:path'), { createHash } = require('node:crypto');
 const TASK_ID = /^\d{8}-\d{2,}$/;
@@ -29,7 +30,7 @@ function reserveTaskId(store, project, dir, day) {
   for (const name of ['log.jsonl', 'log.old.jsonl']) {
     const file = path.join(store.root, '_hub', name); noLinks(file);
     if (exists(file)) for (const line of fs.readFileSync(file, 'utf8').split('\n').filter(x => x.trim())) {
-      let row; try { row = JSON.parse(line); } catch { throw Error('作業番号の履歴を読めません。記録を確認してください'); }
+      let row; try { row = JSON.parse(line); } catch { throw Error(lt('作業番号の履歴を読めません。記録を確認してください')); }
       observe(row);
     }
   }

@@ -1,4 +1,5 @@
 'use strict';
+const { lt } = require("./locale");
 // AIの完了報告と、人が一覧から完了へ移す判断を分ける。
 const fs = require('node:fs');
 const path = require('node:path');
@@ -16,7 +17,7 @@ class Completion {
     } catch (e) {
       if (fs.existsSync(this.file)) fs.renameSync(this.file, `${this.file}.corrupt-${Date.now()}`);
       if (fs.existsSync(marker)) {
-        this.warning = '完了承認の記録を読めないため、未確認の完了を一覧に戻しています。';
+        this.warning = lt('完了承認の記録を読めないため、未確認の完了を一覧に戻しています。');
       }
     }
     if (!fs.existsSync(marker)) {

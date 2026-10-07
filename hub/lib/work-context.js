@@ -1,4 +1,5 @@
 'use strict';
+const { lt } = require("./locale");
 function parentId(p, all) { return all.find(x=>x.id===p.parent)?.id || (all.filter(x=>x.name===p.parent).length===1 ? all.find(x=>x.name===p.parent).id : ''); }
 function familyRoot(p, all) {
  const seen=new Set(); let cur=p;
@@ -14,17 +15,17 @@ function sourceOf(p, value, all) {
 }
 function validateTask(p,t,change,all) {
  const kind=change.kind ?? t?.kind ?? 'main', ref=change.derivedFrom ?? t?.derivedFrom ?? '', mode=change.workspaceMode ?? t?.workspaceMode ?? 'isolated';
- if(!['main','derived'].includes(kind) || !['isolated','direct'].includes(mode)) throw Error('作業の種類・場所を確認してください');
+ if(!['main','derived'].includes(kind) || !['isolated','direct'].includes(mode)) throw Error(lt('作業の種類・場所を確認してください'));
  if(kind==='derived') {
-  let src=sourceOf(p,ref,all); if(!src)throw Error('同じ大きなプロジェクト内から派生元を選んでください');
+  let src=sourceOf(p,ref,all); if(!src)throw Error(lt('同じ大きなプロジェクト内から派生元を選んでください'));
   const seen=new Set(t?[`${p.id}/${t.id}`]:[]);
-  while(src) {const key=`${src.project.id}/${src.task.id}`;if(seen.has(key))throw Error('派生元が循環しています');seen.add(key);src=sourceOf(src.project,src.task.derivedFrom,all);}
+  while(src) {const key=`${src.project.id}/${src.task.id}`;if(seen.has(key))throw Error(lt('派生元が循環しています'));seen.add(key);src=sourceOf(src.project,src.task.derivedFrom,all);}
  }
  const parent=change.parent ?? t?.parent ?? '';
  if(parent && change.parent !== undefined) {
   let cur=p.tasks.find(x=>x.id===parent),seen=new Set(t?[t.id]:[]);
-  if(!cur)throw Error('親作業が見つかりません');
-  while(cur) {if(seen.has(cur.id))throw Error('親子関係が循環しています');seen.add(cur.id);cur=p.tasks.find(x=>x.id===cur.parent);}
+  if(!cur)throw Error(lt('親作業が見つかりません'));
+  while(cur) {if(seen.has(cur.id))throw Error(lt('親子関係が循環しています'));seen.add(cur.id);cur=p.tasks.find(x=>x.id===cur.parent);}
  }
  return {kind,derivedFrom:kind==='derived'?ref:'',workspaceMode:mode};
 }

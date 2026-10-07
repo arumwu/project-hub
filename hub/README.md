@@ -1,5 +1,7 @@
 # Project Hub
 
+[繁體中文](README.zh-TW.md) · [日本語](README.md)
+
 今の版は `package.json` の version（画面の左上にも出る）。変更の記録は [CHANGELOG.md](CHANGELOG.md)。
 
 プロジェクトと作業を一覧にして、画面の中で Claude Code / Codex を動かす管理ソフト。1人で使う Mac の中だけで使う。使う前に「使う前に知っておくこと」を読んでください。
@@ -16,7 +18,7 @@ bash hub/setup.sh
 ```
 
 - 何度実行しても大丈夫
-- `~/Documents/AI-Workspace/` に `_hub/`（役割分担 `roles.yaml`）・`Product/`（台帳）・`Work/`（作業用コピー）ができる。場所は `HUB_ROOT` で変えられる。すでにある roles.yaml と台帳は触らない
+- `~/Documents/AI-Workspace/` に `_hub/`（役割分担 `roles.yaml`）・`Product/`（台帳）・`Work/`（作業用コピー）ができる。場所は `HUB_ROOT` で変えられる。繁体字中国語版は `HUB_LANG=zh-TW bash hub/setup.sh` で準備する（既存の日本語台帳も読める）。すでにある roles.yaml と台帳は触らない
 - `hub/seed/` の架空のサンプル台帳を `Product/` に写す。実際のプロジェクトや作業記録ではない。見本のフォルダパスは自分の環境に合わせて変更する
 - npm で作業画面の部品（node-pty）を入れる。入らなくても管理ソフトは動き、作業は別の窓で開く
 - デスクトップに「Project Hub」ができる
@@ -110,7 +112,21 @@ Codex（ChatGPTログイン）とClaude（契約ログイン）の既存CLIか�
 - 上限時の自動切替、200k 超えの圧縮の見張り
 - 操作画面を作る、整理する
 
-## 最新にする
+## Project Hub の自動更新
+
+公開版では既定でオフです。設定の「Project Hub の自動更新」で切り替えられます。設定をまだ保存していない時は `HUB_AUTO_UPDATE=1` を既定値に使い、保存済みの設定を優先します。
+
+更新元は作者の `https://github.com/kieiken/project-hub` の `main` だけです。GitHub への確認は24時間に1回まで。前回の確認時刻を保存し、起動し直しても確認を追加しません。「今すぐ更新を確認」も、期限前は保存済みの結果と次の確認時刻を表示します。
+
+AI や待ち順が残っている時、元のコードが未保存の時は待ちます。隔離したコピーで新版を統合し、ログイン済みの Codex CLI で繁体字中国語を更新します。依存の導入、全テスト、公開内容の確認、Mac アプリの組み立てと署名検証を通してから置き換え、前のアプリとコードを残します。
+
+確認済みの翻訳は設定済みの個人 fork の枝へ送り、作者の `kieiken/project-hub` の `main` を対象に Pull Request を作ります。作者の `main` を直接書き換えません。PR の作成確認後に画面から開けます。PR の提出と作者による受領・統合は別です。Codex CLI と GitHub CLI（`gh`）へのログインに加え、App の起動環境に `HUB_AUTO_TRANSLATE=1` と `HUB_TRANSLATION_FORK=<アカウント>/project-hub` を設定します。公開 fork の既定の枝は `automation/zh-tw` で、`HUB_TRANSLATION_BRANCH` でも指定できます。翻訳と PR の案内は、対応する処理が設定されている時だけ出ます。
+
+自動適用には macOS、翻訳と更新機能を含むコミット済みの Git ソース（`HUB_UPDATE_SOURCE`）、更新先アプリの絶対パス（`HUB_UPDATE_APP`）、実行できるディスク確認プログラム（`HUB_STORAGE_GUARD`）の設定が必要です。持ち運べる `.app` だけでは Git ソースが無いため未対応になります。ディスクの確認が通らない時は通信・保存・更新を停止します。
+
+この繁体字中国語の PR が作者側へ統合されるまでは、翻訳と更新機能を保って新版を統合します。衝突、翻訳、テスト、組み立てや署名の失敗では前の版を保ち、理由を表示します。将来の全版で自動成功する保証はありません。PR の送信結果はアプリの適用状態と分けて表示し、送信失敗を送信済みとは扱いません。設定と記録は `HUB_ROOT/_hub/updates/` に残ります。AI CLI 自体の更新は、従来の「AI の更新」で別に行います。
+
+## 手動で最新にする
 
 Gitで取得したフォルダの一番上で実行する（ZIPで取得した場合は、新しい版の配布物を取得する）：
 

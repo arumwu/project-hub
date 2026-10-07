@@ -1,5 +1,8 @@
 #!/bin/bash
 # Project Hub を起動して、ブラウザで開く
+if [ -n "${HUB_STORAGE_GUARD:-}" ]; then
+  "$HUB_STORAGE_GUARD" || exit $?
+fi
 cd "$(dirname "$0")"
 PORT="${HUB_PORT:-4545}"
 URL="http://127.0.0.1:$PORT"
@@ -18,8 +21,8 @@ if [ -z "$NODE" ]; then
   NODE="$(zsh -lic 'command -v node' 2>/dev/null | tail -n 1)"
 fi
 if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
-  echo "Node.js が見つかりません。https://nodejs.org から入れてください。"
-  read -r -p "Enter で閉じます"
+  if [ "${HUB_LANG:-ja}" = "zh-TW" ]; then echo "找不到 Node.js，請從 https://nodejs.org 安裝。"; else echo "Node.js が見つかりません。https://nodejs.org から入れてください。"; fi
+  read -r -p "$(if [ "${HUB_LANG:-ja}" = "zh-TW" ]; then echo "按 Enter 關閉"; else echo "Enter で閉じます"; fi)"
   exit 1
 fi
 
@@ -38,5 +41,5 @@ done
 
 wait "$PID"
 echo ""
-echo "Project Hub が止まりました。上に出ているメッセージを Claude に貼ってください。"
-read -r -p "Enter で閉じます"
+if [ "${HUB_LANG:-ja}" = "zh-TW" ]; then echo "Project Hub 已停止，請提供上面的訊息。"; else echo "Project Hub が止まりました。上に出ているメッセージを Claude に貼ってください。"; fi
+read -r -p "$(if [ "${HUB_LANG:-ja}" = "zh-TW" ]; then echo "按 Enter 關閉"; else echo "Enter で閉じます"; fi)"

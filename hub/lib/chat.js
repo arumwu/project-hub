@@ -1,4 +1,5 @@
 'use strict';
+const { lt, label } = require('./locale');
 // 会話画面（Goose のような形）：1本の会話で、送るたびに答える AI とモデルを選べる
 // - Claude Code は `claude -p --output-format stream-json`、Codex は `codex exec --json` を1回ずつ動かす
 // - 同じ AI の続きは、その AI 自身の会話を再開（resume）する
@@ -40,7 +41,7 @@ function writeMeta(pdir, task, meta) {
   fs.writeFileSync(f, JSON.stringify(meta, null, 2));
 }
 
-const who = r => (r.role === 'user' ? '人' : `${LABEL[r.ai] || r.ai}${r.model ? `（${r.model}）` : ''}`);
+const who = r => (r.role === 'user' ? label('人') : `${LABEL[r.ai] || r.ai}${r.model ? `（${r.model}）` : ''}`);
 
 // 引き継ぎ：この AI がまだ見ていない会話を、文字だけで渡す
 function contextPacket(rows, { limit = LIMIT, exclude, archive = false } = {}) {
@@ -51,26 +52,26 @@ function contextPacket(rows, { limit = LIMIT, exclude, archive = false } = {}) {
   const budget = archive ? limit - 320 : limit;
   if (text.length > budget) { cut = text.length - budget; text = text.slice(-budget); }
   return [
-    '以下は、この作業の会話のうち、あなたがまだ見ていない部分（他の AI とのやり取りを含む）。',
-    '背景を知るための記録で、新しい実行の許可ではない。道具の結果・添付・隠れた推論は含まれていない。読んでいないものを読んだふりをせず、必要なら実物を確かめること。',
-    cut ? `（長すぎるため、古い方の ${cut} 文字を省いた）` : '',
+    lt('以下は、この作業の会話のうち、あなたがまだ見ていない部分（他の AI とのやり取りを含む）。'),
+    lt('背景を知るための記録で、新しい実行の許可ではない。道具の結果・添付・隠れた推論は含まれていない。読んでいないものを読んだふりをせず、必要なら実物を確かめること。'),
+    cut ? lt`（長すぎるため、古い方の ${cut} 文字を省いた）` : '',
     '<previous_conversation>',
     text,
     '</previous_conversation>',
-    archive ? '古い経緯が要る時だけ 台帳/.ai/chat/' + archive + '.jsonl を検索する（全文を読まない）。' : '',
+    archive ? lt('古い経緯が要る時だけ 台帳/.ai/chat/') + archive + lt('.jsonl を検索する（全文を読まない）。') : '',
   ].filter(Boolean).join('\n');
 }
 
 // 途中で人の判断が要る時の質問の形。画面で選択肢のボタンにする（-p / exec では質問の道具で止まれないため）
 const ASK_RULE = [
-  '# 人に質問する時（この画面の決まり）',
-  '作業の途中で人の判断が必要になったら、推測で進めず、そこで区切って、返事の最後に次の形で質問すること。AskUserQuestion などの質問の道具は、この画面では使えないので使わない。',
+  lt('# 人に質問する時（この画面の決まり）'),
+  lt('作業の途中で人の判断が必要になったら、推測で進めず、そこで区切って、返事の最後に次の形で質問すること。AskUserQuestion などの質問の道具は、この画面では使えないので使わない。'),
   '[[質問]]',
-  '質問文（複数選べる時は最後に「（複数可）」）',
-  '1. 選択肢（おすすめがあれば1番目にして「（おすすめ）」を付ける）',
-  '2. 選択肢',
+  lt('質問文（複数選べる時は最後に「（複数可）」）'),
+  lt('1. 選択肢（おすすめがあれば1番目にして「（おすすめ）」を付ける）'),
+  lt('2. 選択肢'),
   '[[/質問]]',
-  '選択肢は2〜4個。質問が複数ある時は、この形を続けて書く。人は選択肢を押すか、自分で書いて答える。',
+  lt('選択肢は2〜4個。質問が複数ある時は、この形を続けて書く。人は選択肢を押すか、自分で書いて答える。'),
 ].join('\n');
 
 // 返事の中の質問を取り出す（本文からは外す）
@@ -83,7 +84,7 @@ function parseAsk(text) {
       if (m) options.push(m[1].trim()); else if (!options.length) q.push(l);
     }
     const question = q.join('\n');
-    if (question || options.length) asks.push({ question, options: options.slice(0, 8), multi: /[（(]複数可[）)]/.test(question) });
+    if (question || options.length) asks.push({ question, options: options.slice(0, 8), multi: /[（(](?:複数可|可複選)[）)]/.test(question) });
     return '';
   }).trim();
   return { text: rest, asks };
@@ -105,12 +106,12 @@ function buildTurn({ ai, model, effort, meta, rows, text, basePrompt, policy, pe
   const selected = instructions.select(basePrompt, { meta, ai, sid, resume, restore: Boolean(rows.findLast(r => r.role === 'assistant')?.error) });
   const prefix = selected.rules ? selected.prefix : resume ? policy : basePrompt;
   const m = launch.flagFor(ai, model);
-  const prompt = [prefix, launch.startupInfo(ai, model, m) + (limitSwitch ? '（Fable の利用上限による自動の引き継ぎ）' : ''), String(prefix || '').includes(launch.CONTEXT_RULE) ? '' : launch.CONTEXT_RULE, ASK_RULE, ctx, `# 今回の依頼\n${text}`].filter(Boolean).join('\n\n');
+  const prompt = [prefix, launch.startupInfo(ai, model, m) + (limitSwitch ? lt('（Fable の利用上限による自動の引き継ぎ）') : ''), String(prefix || '').includes(launch.CONTEXT_RULE) ? '' : launch.CONTEXT_RULE, ASK_RULE, ctx, lt`# 今回の依頼\n${text}`].filter(Boolean).join('\n\n');
   const base = (perm || launch.DEFAULT_CMD[ai]).trim().split(/\s+/).filter(Boolean);
   const e = noEffort ? '' : effort && launch.EFFORT_FLAG[ai][effort];
   let args;
   if (ai === 'agy') {
-    if (m !== launch.AGY_MODEL.id) throw new Error('Agy で承認されているモデルは Gemini 3.1 Pro (High) だけです');
+    if (m !== launch.AGY_MODEL.id) throw new Error(lt('Agy で承認されているモデルは Gemini 3.1 Pro (High) だけです'));
     args = ['--dangerously-skip-permissions', '--output-format', 'stream-json', '--model', m, '--print=' + prompt];
     if (resume) args.push('--conversation', sid);
   } else if (ai === 'claude') {
@@ -149,7 +150,7 @@ function parse(ai, o) {
   if (!o || typeof o !== 'object') return ev;
   if (ai === 'agy') {
     if (o.event === 'init') {
-      if (o.init?.model !== launch.AGY_MODEL.id) return [{ kind: 'done', error: 'Agy の応答モデルが承認された Gemini 3.1 Pro (High) と一致しないため停止しました', abort: true }];
+      if (o.init?.model !== launch.AGY_MODEL.id) return [{ kind: 'done', error: lt('Agy の応答モデルが承認された Gemini 3.1 Pro (High) と一致しないため停止しました'), abort: true }];
       if (o.conversation_id) ev.push({ kind: 'session', id: o.conversation_id });
     }
     const step = o.step_update;
@@ -159,9 +160,9 @@ function parse(ai, o) {
     }
     if (o.event === 'result') {
       const result = o.result || {};
-      ev.push({ kind: 'done', error: result.status === 'SUCCESS' ? '' : String(result.error?.message || result.error || result.message || 'Agy が途中で止まりました'), result: typeof result.response === 'string' ? result.response : '' });
+      ev.push({ kind: 'done', error: result.status === 'SUCCESS' ? '' : String(result.error?.message || result.error || result.message || lt('Agy が途中で止まりました')), result: typeof result.response === 'string' ? result.response : '' });
     }
-    if (o.event === 'error') ev.push({ kind: 'done', error: String(o.error?.message || o.error || o.message || 'Agy のエラー') });
+    if (o.event === 'error') ev.push({ kind: 'done', error: String(o.error?.message || o.error || o.message || lt('Agy のエラー')) });
     return ev;
   }
   if (ai === 'claude') {
@@ -180,7 +181,7 @@ function parse(ai, o) {
         else if (c.type === 'tool_use') ev.push({ kind: 'tool', text: toolLine(c.name, c.input) });
       }
     }
-    if (o.type === 'result') ev.push({ kind: 'done', error: o.is_error ? String(o.result || 'エラー') : '', result: typeof o.result === 'string' ? o.result : '', usage: inputUsage('claude', o.usage) });
+    if (o.type === 'result') ev.push({ kind: 'done', error: o.is_error ? String(o.result || lt('エラー')) : '', result: typeof o.result === 'string' ? o.result : '', usage: inputUsage('claude', o.usage) });
     return ev;
   }
   // Codex（新しい形）
@@ -188,20 +189,20 @@ function parse(ai, o) {
   if (o.type === 'item.completed' && o.item) {
     const it = o.item;
     if (it.type === 'agent_message' && it.text) ev.push({ kind: 'text', text: it.text });
-    else if (it.type === 'command_execution') ev.push({ kind: 'tool', text: toolLine('コマンド', { command: it.command }) });
-    else if (it.type === 'file_change') ev.push({ kind: 'tool', text: `ファイル変更：${(it.changes || []).map(c => c.path).join('、')}` });
-    else if (it.type === 'error' && it.message && !NOISE.test(it.message)) ev.push({ kind: 'tool', text: `注意：${it.message}` });
+    else if (it.type === 'command_execution') ev.push({ kind: 'tool', text: toolLine(lt('コマンド'), { command: it.command }) });
+    else if (it.type === 'file_change') ev.push({ kind: 'tool', text: lt`ファイル変更：${(it.changes || []).map(c => c.path).join('、')}` });
+    else if (it.type === 'error' && it.message && !NOISE.test(it.message)) ev.push({ kind: 'tool', text: lt`注意：${it.message}` });
   }
   if (o.type === 'turn.completed') ev.push({ kind: 'done', error: '', usage: inputUsage('codex', o.usage) });
-  if (o.type === 'turn.failed' || o.type === 'error') ev.push({ kind: 'done', error: String((o.error && o.error.message) || o.message || 'エラー') });
+  if (o.type === 'turn.failed' || o.type === 'error') ev.push({ kind: 'done', error: String((o.error && o.error.message) || o.message || lt('エラー')) });
   // Codex（古い形）
   const m = o.msg;
   if (m && typeof m === 'object') {
     if (m.type === 'session_configured' && m.session_id) ev.push({ kind: 'session', id: m.session_id });
     if (m.type === 'agent_message' && m.message) ev.push({ kind: 'text', text: m.message });
-    if (m.type === 'exec_command_begin') ev.push({ kind: 'tool', text: toolLine('コマンド', { command: m.command }) });
+    if (m.type === 'exec_command_begin') ev.push({ kind: 'tool', text: toolLine(lt('コマンド'), { command: m.command }) });
     if (m.type === 'task_complete') ev.push({ kind: 'done', error: '' });
-    if (m.type === 'error') ev.push({ kind: 'done', error: String(m.message || 'エラー') });
+    if (m.type === 'error') ev.push({ kind: 'done', error: String(m.message || lt('エラー')) });
   }
   return ev;
 }
@@ -230,10 +231,10 @@ class ChatRunner {
   // 自動開始と保存キュー再開は、再確認中も作業を確保する。
   async sendQueued(o) {
     const { project, task } = o, k = this.key(project, task);
-    if (this.busy(project, task)) throw Error('まだ前の返事を書いています。終わるか［止める］を押してから送ってください');
+    if (this.busy(project, task)) throw Error(lt('まだ前の返事を書いています。終わるか［止める］を押してから送ってください'));
     const pending = { pending: true, options: o, request: o.request, ai: o.ai, model: o.model, texts: [], started: Date.now(), last: '', stopped: false };
     pending.finishedP = new Promise(resolve => { pending.resolveFinished = resolve; });
-    const cancelled = new Promise((_, reject) => { pending.cancel = () => reject(Error('利用枠の確認中に停止されました。AIは開始していません')); });
+    const cancelled = new Promise((_, reject) => { pending.cancel = () => reject(Error(lt('利用枠の確認中に停止されました。AIは開始していません'))); });
     this.running.set(k, pending);
     this.emit(project, task, { type: 'busy', ai: o.ai, model: o.model, started: pending.started });
     try {
@@ -241,8 +242,8 @@ class ChatRunner {
       const request = o.limitSwitch?.direct || o.limitSwitch?.preflight
         ? { ...o, ai: 'claude', model: 'Fable 5.1', limitSwitch: undefined } : o;
       await Promise.race([Promise.resolve().then(() => this.beforeQueued?.(request)), cancelled]);
-      if (pending.stopped) throw Error('利用枠の確認中に停止されました。AIは開始していません');
-      if (!this.queue(project, task).some(x => x.id === o.request)) throw Error('その指示はもう待っていません');
+      if (pending.stopped) throw Error(lt('利用枠の確認中に停止されました。AIは開始していません'));
+      if (!this.queue(project, task).some(x => x.id === o.request)) throw Error(lt('その指示はもう待っていません'));
       this.running.delete(k);
       return this.send({ ...o, mode: 'queued' }); // active判定・端末競合などを待機後に再確認する。
     } finally {
@@ -255,9 +256,9 @@ class ChatRunner {
   // 確認中の追加説明・やり直しは、未保存の依頼と起動条件を引き継ぐ。
   replacePending(p, t, text, mode) {
     const pending = this.busy(p, t);
-    if (!pending?.pending || pending.stopped) throw Error('その依頼の利用枠確認は終了しています。現在の状態を確かめてください');
+    if (!pending?.pending || pending.stopped) throw Error(lt('その依頼の利用枠確認は終了しています。現在の状態を確かめてください'));
     const q = this.queue(p, t), index = q.findIndex(x => x.id === pending.request);
-    if (index < 0) throw Error('その指示はもう待っていません');
+    if (index < 0) throw Error(lt('その指示はもう待っていません'));
     let o = pending.options;
     if (o.limitSwitch?.direct || o.limitSwitch?.preflight) {
       o = { ...o, ai: 'claude', model: 'Fable 5.1', requireModel: true, requiredModel: 'claude-fable-5-1', perm: this.permFor?.('claude') || launch.DEFAULT_CMD.claude,
@@ -265,8 +266,8 @@ class ChatRunner {
     }
     const original = o.shown || o.text;
     const combined = mode === 'amend'
-      ? `（人が追加の説明を送りました。次の元の指示は取り消さず、この追加説明も合わせて行ってください）\n${original}\n\n追加説明：\n${text}`
-      : `（人が利用枠確認中の依頼を取り消しました。この新しい指示だけを行ってください）\n${text}`;
+      ? lt`（人が追加の説明を送りました。次の元の指示は取り消さず、この追加説明も合わせて行ってください）\n${original}\n\n追加説明：\n${text}`
+      : lt`（人が利用枠確認中の依頼を取り消しました。この新しい指示だけを行ってください）\n${text}`;
     // 旧確認の遅延完了・失敗通知が、新しい依頼を取り消したり復活させないようIDを分ける。
     const request = randomUUID();
     const replacement = { ...q[index], id: request, ai: o.ai, model: o.model, effort: o.effort, role: o.role, perm: o.perm,
@@ -280,7 +281,7 @@ class ChatRunner {
   send(o) {
     const { project, task, pdir } = o;
     let { ai, model } = o;
-    if (this.busy(project, task)) throw new Error('まだ前の返事を書いています。終わるか［止める］を押してから送ってください');
+    if (this.busy(project, task)) throw new Error(lt('まだ前の返事を書いています。終わるか［止める］を押してから送ってください'));
     // 旧直行キューも共通の証拠判定へ戻す。保存済みのdirect印を許可として使わない。
     if (o.limitSwitch?.direct || o.limitSwitch?.preflight) {
       o = { ...o, ai: 'claude', model: 'Fable 5.1', requireModel: true, requiredModel: 'claude-fable-5-1', perm: this.permFor?.('claude') || launch.DEFAULT_CMD.claude,
@@ -299,8 +300,8 @@ class ChatRunner {
         resume: false, started: Promise.resolve(true) };
     }
     const modelFlag = launch.flagFor(ai, model);
-    if (o.requireModel && !modelFlag) throw new Error(`指定モデル「${model}」の CLI 名が使えないため、委任を開始できません。モデル指定なしでは起動しません`);
-    if (o.requiredModel && o.requiredModel !== modelFlag) throw new Error(`指定モデル「${model}」の CLI 名が依頼時から変更されたため、委任を開始できません。別のモデルへは切り替えません`);
+    if (o.requireModel && !modelFlag) throw new Error(lt`指定モデル「${model}」の CLI 名が使えないため、委任を開始できません。モデル指定なしでは起動しません`);
+    if (o.requiredModel && o.requiredModel !== modelFlag) throw new Error(lt`指定モデル「${model}」の CLI 名が依頼時から変更されたため、委任を開始できません。別のモデルへは切り替えません`);
     const unavailable = this.canStart && this.canStart(ai, model, o);
     if (unavailable) throw new Error(unavailable);
     // 自動の順番待ちは前の番の prompt を引き継ぐため、起動前に表示情報を更新する。
@@ -316,11 +317,11 @@ class ChatRunner {
         const shown = buildHandoffCard({ original, direct: true, evidence });
         o = { ...o, ...backup, requireModel: true, requiredModel: 'gpt-6-astra', request, shown,
           text: card, limitSwitch };
-        if (launch.flagFor(o.ai, o.model) !== 'gpt-6-astra') throw Error('上限による引き継ぎの指定モデルが使えません。別のモデルでは起動しません');
+        if (launch.flagFor(o.ai, o.model) !== 'gpt-6-astra') throw Error(lt('上限による引き継ぎの指定モデルが使えません。別のモデルでは起動しません'));
         const unavailable = this.canStart && this.canStart(o.ai, o.model, o);
         if (unavailable) throw Error(unavailable);
-        const time = at => at === null ? '手動解除まで' : new Date(at).toLocaleString('ja-JP');
-        preflight = { role: 'event', ai: 'claude', limitSwitch, text: `Fable 5.1 上限保持中（記録 ${time(evidence.at)}・解除 ${time(evidence.validUntil)}）。最初から Astra で開始` };
+        const time = at => at === null ? lt('手動解除まで') : new Date(at).toLocaleString('ja-JP');
+        preflight = { role: 'event', ai: 'claude', limitSwitch, text: lt`Fable 5.1 上限保持中（記録 ${time(evidence.at)}・解除 ${time(evidence.validUntil)}）。最初から Astra で開始` };
       }
     }
     ({ ai, model } = o);
@@ -378,16 +379,16 @@ class ChatRunner {
       this.running.delete(this.key(project, task));
       let text = run.texts.join(ai === 'agy' ? '' : '\n\n') || (run.done && run.done.result) || '';
       let error = '';
-      if (run.stopped) error = '止めました';
+      if (run.stopped) error = lt('止めました');
       else if (run.done && run.done.error) error = run.done.error;
-      else if (code !== 0 && code !== null) error = (run.err.trim().split('\n').slice(-3).join(' ') || `終了コード ${code}`);
-      else if (code === null && !text) error = run.err.trim() || '途中で終わりました';
+      else if (code !== 0 && code !== null) error = (run.err.trim().split('\n').slice(-3).join(' ') || lt`終了コード ${code}`);
+      else if (code === null && !text) error = run.err.trim() || lt('途中で終わりました');
       if (!run.stopped && run.limit && !run.done && !run.err.trim()) error = run.limit;
       const modelRejected = error && !text && turn.modelFlag && !run.stopped && MODEL_REJECTED.test(error + ' ' + run.err);
-      if (modelRejected) error = `指定したモデル「${turn.modelFlag}」を ${LABEL[ai]} が受け付けませんでした。設定画面の「AI の更新」と「CLI に渡すモデル名」を確認してください。${error}`;
+      if (modelRejected) error = lt`指定したモデル「${turn.modelFlag}」を ${LABEL[ai]} が受け付けませんでした。設定画面の「AI の更新」と「CLI に渡すモデル名」を確認してください。${error}`;
       // 思考の指定を断られた：指定なしで1回だけやり直す
       if (!modelRejected && error && !text && turn.effortFlag && !run.stopped && EFFORT_REJECTED.test(error + ' ' + run.err)) {
-        this.emit(project, task, { type: 'row', row: append(pdir, task, { role: 'event', ai, text: `思考「${effort}」の指定は使えなかったため、指定なしでやり直します` }) });
+        this.emit(project, task, { type: 'row', row: append(pdir, task, { role: 'event', ai, text: lt`思考「${effort}」の指定は使えなかったため、指定なしでやり直します` }) });
         const next = { ...o, noEffort: true };
         return this.run(next, buildTurn({ ...next, meta, rows }), meta, rows);
       }
@@ -408,7 +409,7 @@ class ChatRunner {
           if (run.limit && USAGE_LIMIT.test(error)) this.onLimit?.(o);
           else if (!error && code === 0 && run.done && !run.limit) this.onFableSuccess?.(o.started);
         } catch (e) {
-          this.emit(project, task, { type: 'row', row: append(pdir, task, { role: 'event', ai, text: `上限の確認記録を更新できませんでした：${e.message}` }) });
+          this.emit(project, task, { type: 'row', row: append(pdir, task, { role: 'event', ai, text: lt`上限の確認記録を更新できませんでした：${e.message}` }) });
         }
       }
       if (closed && run.spawned && !cancelled() && !o.limitSwitch && ai === 'claude' &&
@@ -427,11 +428,11 @@ class ChatRunner {
               const shown = buildHandoffCard({ original, user: o.userRow, rows: read(pdir, task), dir, pdir, task, queue: this.queue(project, task), delegates: this.delegates?.(project, task) || [] });
               const item = { ...backup, id: `limit-${request}`, at: new Date().toISOString(), text: shown, shown, limitSwitch };
               this.setQueue(project, task, [item, ...this.queue(project, task)], true);
-              this.emit(project, task, { type: 'row', row: append(pdir, task, { role: 'event', ai, limitSwitch, text: 'Fable 5.1 が利用上限で止まったため、同じ作業を Codex・GPT-6-Astra で続けます（人の決まり：司令塔・チェックの Fable 上限の時だけ）' }) });
+              this.emit(project, task, { type: 'row', row: append(pdir, task, { role: 'event', ai, limitSwitch, text: lt('Fable 5.1 が利用上限で止まったため、同じ作業を Codex・GPT-6-Astra で続けます（人の決まり：司令塔・チェックの Fable 上限の時だけ）') }) });
             }
           } catch (e) {
             run.limitSaveFailed = true;
-            this.emit(project, task, { type: 'row', row: append(pdir, task, { role: 'event', ai, text: `上限による引き継ぎを保存できませんでした：${e.message}` }) });
+            this.emit(project, task, { type: 'row', row: append(pdir, task, { role: 'event', ai, text: lt`上限による引き継ぎを保存できませんでした：${e.message}` }) });
           }
         }
       }
@@ -447,19 +448,19 @@ class ChatRunner {
           if (!this.queue(project, task).some(x => x.id === next.id)) return;
           // 確認中に取り消された依頼を戻さず、後続の順序も保持する。
           this.setQueue(project, task, this.queue(project, task).map(x => x.id === next.id ? { ...x, error } : x));
-          this.emit(project, task, { type: 'row', row: append(pdir, task, { role: 'event', ai: next.ai, text: `順番待ちの依頼を始められませんでした：${error}` }) });
+          this.emit(project, task, { type: 'row', row: append(pdir, task, { role: 'event', ai: next.ai, text: lt`順番待ちの依頼を始められませんでした：${error}` }) });
         };
         try {
           this.sendQueued({ ...b, ai: next.ai, model: next.model, effort: next.effort, text: next.text, perm: next.perm, requireModel: Boolean(next.requireModel), requiredModel: next.requiredModel, role: next.role || '', limitSwitch: next.limitSwitch, images: [], mode: 'queued', shown: next.shown, request: next.id, started: undefined, noEffort: false })
             .then(async r => {
               if (await r.started) this.unqueue(project, task, next.id);
-              else retain('AIを起動できませんでした。CLIの導入状態を確認してください');
+              else retain(lt('AIを起動できませんでした。CLIの導入状態を確認してください'));
             }).catch(e => retain(String(e.message || e)));
         } catch (e) { retain(String(e.message || e)); }
       }
       return undefined;
     };
-    child.on('error', e => { run.err = e.code === 'ENOENT' ? `「${turn.command}」が見つかりません。ターミナルで ${turn.command} が動くか確かめてください` : String(e.message); finish(1); });
+    child.on('error', e => { run.err = e.code === 'ENOENT' ? lt`「${turn.command}」が見つかりません。ターミナルで ${turn.command} が動くか確かめてください` : String(e.message); finish(1); });
     child.on('close', (code, signal) => { if (rest.trim()) consume(rest); finish(code, !signal); });
     return run;
   }
@@ -503,7 +504,7 @@ class ChatRunner {
           else fs.writeFileSync(f, JSON.stringify(q, null, 2));
         }
       } catch (e) { if (requireSave) throw e; /* 通常の待ち順は今までどおり画面に残す */ }
-    } else if (requireSave) throw Error('作業の台帳が見つかりません');
+    } else if (requireSave) throw Error(lt('作業の台帳が見つかりません'));
     this.queues.set(this.key(p, t), q);
     this.emit(p, t, { type: 'queue', queue: q });
     return q;

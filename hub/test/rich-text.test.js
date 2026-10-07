@@ -1,8 +1,9 @@
 'use strict';
+const uiLocale = require('./ui-locale-fixture');
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const src=fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8');
 const esc=s=>String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
-function fixture(){let click;const ctx=vm.createContext({esc,linkify:t=>`PLAIN:${esc(t)}`,document:{addEventListener:(k,cb)=>click=cb},setTimeout(){},copyText:async()=>true});vm.runInContext(src.slice(src.indexOf('// 囲みの中はリンク'),src.indexOf('// コピーできたか')),ctx);return {ctx,click};}
+function fixture(){let click;const ctx=vm.createContext({UI:uiLocale(),esc,linkify:t=>`PLAIN:${esc(t)}`,document:{addEventListener:(k,cb)=>click=cb},setTimeout(){},copyText:async()=>true});vm.runInContext(src.slice(src.indexOf('// 囲みの中はリンク'),src.indexOf('// コピーできたか')),ctx);return {ctx,click};}
 test('fences preserve exact whitespace, multiline Japanese, HTML and path text without links',()=>{
  const f=fixture(),value='　全角  spaces\n<script>"x"</script>\n/Users/a/file.md\n';const out=f.ctx.richText('before\n```text\n'+value+'```\nafter');assert.ok(out.includes('<code>'+esc(value)+'</code>'));assert.doesNotMatch(out,/<script>|data-path=/);assert.match(out,/cb-copy/);assert.match(out,/PLAIN:before/);assert.match(out,/PLAIN:after/);
 });
@@ -16,7 +17,7 @@ test('copy click passes exact code text, and only success shows success state',a
 });
 
 test('paths and URLs outside fences retain normal links, with no links inside',()=>{
- const c=vm.createContext({esc,document:{addEventListener(){}},setTimeout(){}});
+ const c=vm.createContext({UI:uiLocale(),esc,document:{addEventListener(){}},setTimeout(){}});
  const start=src.indexOf('const LINK_RE');vm.runInContext(src.slice(start,src.indexOf('// コピーできたか',start)),c);
  const out=c.richText('/Users/example/source.md https://example.com/page\n```text\n/Users/example/source.md\n```');
  assert.match(out,/data-path=/);assert.match(out,/data-url=/);assert.doesNotMatch(out.match(/<code>([\s\S]*?)<\/code>/)[1],/data-path=|data-url=/);

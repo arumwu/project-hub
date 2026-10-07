@@ -1,4 +1,5 @@
 'use strict';
+const { lt } = require("./locale");
 // 子プロジェクトの結果を親プロジェクトへ渡す：親の「受け取る作業」の「やったこと」に1行書き、会話にも1行足して未読にする
 // 同じ出来事（子・種類・文が同じ）は2回渡さない。渡した記録は _hub/handoff.json
 const fs = require('fs');
@@ -6,7 +7,7 @@ const path = require('path');
 const chat = require('./chat');
 const { hash } = require('./completion');
 
-const RECEIVE_TITLE = '子プロジェクトの結果';
+const RECEIVE_TITLE = lt('子プロジェクトの結果');
 const fileOf = root => path.join(root, '_hub', 'handoff.json');
 function load(root) {
   try { const d = JSON.parse(fs.readFileSync(fileOf(root), 'utf8')); return { done: d.done && typeof d.done === 'object' ? d.done : {}, last: d.last && typeof d.last === 'object' ? d.last : {} }; }
@@ -48,7 +49,7 @@ const newestTask = p => p.tasks.find(t => String(t.done || '').trim()) || p.task
 // 完了した時に渡す文：説明＋3行（作業の数・新しい作業・その最後のやったこと）
 function completionText(child) {
   const t = newestTask(child), n = child.tasks.length, d = child.tasks.filter(x => x.state === '完了').length;
-  return [child.description, `作業：全${n}件（完了${d}件）`, `最新の作業：${t ? t.title : 'なし'}`, `やったこと：${(t && lastEntry(t.done)) || 'なし'}`].filter(Boolean).join('\n');
+  return [child.description, lt`作業：全${n}件（完了${d}件）`, lt`最新の作業：${t ? t.title : lt('なし')}`, lt`やったこと：${(t && lastEntry(t.done)) || lt('なし')}`].filter(Boolean).join('\n');
 }
 // 親の画面で使う子の一覧
 function childrenSummary(store, id) {
@@ -79,8 +80,8 @@ function reportToParent(store, childProject, { kind, text }, opts = {}) {
   if (!task) return false;
   const stamp = new Date(), z = n => String(n).padStart(2, '0');
   const at = `${stamp.getFullYear()}-${z(stamp.getMonth() + 1)}-${z(stamp.getDate())} ${z(stamp.getHours())}:${z(stamp.getMinutes())}`;
-  store.appendSection(parent.id, task.id, 'やったこと', `- ${at} 子プロジェクト「${child.name}」${kind}：${body.replace(/\s*[\r\n]+\s*/g, ' / ')}`);
-  const row = chat.append(parent.dir, task.id, { role: 'user', text: `（子プロジェクト「${child.name}」の${kind}）\n${body}`, from: 'child', child: child.id });
+  store.appendSection(parent.id, task.id, 'やったこと', lt`- ${at} 子プロジェクト「${child.name}」${kind}：${body.replace(/\s*[\r\n]+\s*/g, ' / ')}`);
+  const row = chat.append(parent.dir, task.id, { role: 'user', text: lt`（子プロジェクト「${child.name}」の${kind}）\n${body}`, from: 'child', child: child.id });
   if (opts.emitRow) opts.emitRow(parent.id, task.id, row);
   if (opts.unread) opts.unread(parent.id, task.id);
   d.done[key] = { at: row.at, parent: parent.id, task: task.id, child: child.id, kind };

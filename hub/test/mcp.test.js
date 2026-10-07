@@ -79,7 +79,7 @@ test('ChatGPT アプリ（Codex）の設定ファイルに Hub の道具を登�
   assert.match(text, /^model = "gpt-6\.1-sol"\n/); assert.match(text, /\[mcp_servers\.project-hub\]\ncommand = "node"\nargs = \[".*mcp\.js"\]/);
   assert.ok(fs.existsSync(file + '.bak-' + new Date().toISOString().slice(0, 10)));
   assert.strictEqual((await j('/api/chatgpt/register', {})).added, false);
-  assert.strictEqual((fs.readFileSync(file, 'utf8').match(/project-hub/g) || []).length, 1);
+  assert.strictEqual((fs.readFileSync(file, 'utf8').match(/^\s*\[mcp_servers\.project-hub\]/gm) || []).length, 1);
 });
 
 test('実作業の道具は設定がオンの時だけ出る。Mac の外からは呼べない', async () => {

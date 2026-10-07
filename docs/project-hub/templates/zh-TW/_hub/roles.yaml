@@ -1,0 +1,35 @@
+# 角色分工（可在 Hub 設定修改，所有專案共用）
+# 角色鍵、AI 識別碼與思考值保留內部格式；畫面依語言顯示中文。
+# backup 是取得人類批准後的交接候選，不代表可任意自動更換模型。
+# 意見不同時優先採用 Claude 的判斷。
+# 寫作使用 Opus 5.5，不使用 opus-4-6。
+# 格式：[AI, 模型, 思考程度]；思考值 = 中 / 高 / 極高 / MAX / Ultra。
+
+models:                      # 各 AI 可選的模型
+  claude-code: [Opus 5.5, Fable 5.1]
+  codex:       [GPT-6.1-Sol]
+
+agents: [サンプル担当]        # 虛構 Discord 負責人識別碼，請改成實際負責人。
+
+roles:
+  司令塔:       { main: [claude-code, Fable 5.1, 極高], backup: [codex, GPT-6.1-Sol, 高], job: 規劃、分工與進度管理 }
+  調査:         { main: [claude-code, Opus 5.5, 高],   backup: [codex, GPT-6.1-Sol, 高], job: 蒐集資訊與摘要 }
+  デザイン:     { main: [claude-code, Opus 5.5, 高],   backup: [codex, GPT-6.1-Sol, 高], job: 畫面、架構與視覺設計 }
+  画像生成:     { main: [codex, GPT-6.1-Sol, 中],     backup: [人],                     job: 生成圖片 }
+  コーディング: { main: [codex, GPT-6.1-Sol, 高],     backup: [claude-code, Opus 5.5, 高], job: 程式開發 }
+  チェック:     { main: [claude-code, Fable 5.1, 極高], backup: [codex, GPT-6.1-Sol, 高], job: 獨立審查（開發者仍須自行測試） }
+  文章:         { main: [claude-code, Opus 5.5, 中],   backup: [codex, GPT-6.1-Sol, 中], job: 說明文件與手冊 }
+  最終確認:     { main: [人],                          backup: [人],                     job: 判斷是否完成 }
+
+# 使用前確認模型、思考程度與圖片生成方式是否可用，以及相關費用。
+
+permissions:                 # 工作權限（最大權限，略過確認）
+  claude-code: claude --dangerously-skip-permissions
+  codex:       codex --dangerously-bypass-approvals-and-sandbox
+  ask_before: []             # 寫下需要詢問的操作，例如 [付費, 公開]。
+
+switch:                      # 從第二階段開始使用
+  auto: false                # 一般交接須先取得人類批准。
+  confirm: 確認確實達到上限且前一個處理已停止後才交接，不能只看文字判斷
+  read: .ai/tasks/<作業ID>.md # 接手的 AI 要讀取的任務檔。
+  return: 在工作告一段落後交回原負責人
