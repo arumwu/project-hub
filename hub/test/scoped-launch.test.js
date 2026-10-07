@@ -29,3 +29,26 @@ test('shell terminal launches quote project paths and prompts; extra writable ro
   const command=launch.buildCommand({ai:'codex',cmd:'codex',dir:f.main,writableDirs:[f.ledger],prompt});assert.ok(command.includes("'--sandbox' 'workspace-write'"));assert.ok(command.includes(launch.sq(prompt)));assert.ok(command.includes(launch.sq(fs.realpathSync(f.ledger))));
   for(const directory of ['/',os.homedir(),'/Volumes/AI-WORK'])assert.throws(()=>launch.scopedArgs('codex',[],{dir:f.main,writableDirs:[directory]}));
 });
+test('Hub-owned cwd rejects filesystem, home and volume roots, including symlink aliases',t=>{
+  const f=fixture(t);
+  for(const ai of ['codex','claude'])for(const [i,directory]of ['/',os.homedir(),'/Volumes','/Volumes/AI-WORK'].entries()){
+    assert.throws(()=>launch.buildArgv({ai,dir:directory,prompt:'owned task'}));
+    if(fs.existsSync(directory)){
+      const alias=path.join(f.main,ai+'-broad-'+i);fs.symlinkSync(directory,alias,'dir');
+      assert.throws(()=>launch.buildArgv({ai,dir:alias,prompt:'owned task'}));
+      assert.throws(()=>launch.buildCommand({ai,dir:alias,prompt:'owned task'}));
+    }
+  }
+});
+test('project and work-copy cwd aliases use the canonical directory without adding duplicate writable roots',t=>{
+  const f=fixture(t);
+  for(const directory of [f.main,f.copy]){
+    const alias=directory+'-alias';fs.symlinkSync(directory,alias,'dir');
+    for(const ai of ['codex','claude']){
+      const args=launch.scopedArgs(ai,[],{dir:alias,writableDirs:[directory,f.ledger]});
+      assert.deepEqual(roots(args),[fs.realpathSync(f.ledger)]);
+      assert.ok(args.includes(ai==='codex'?'workspace-write':'acceptEdits'));
+    }
+  }
+  assert.ok(launch.buildCommand({ai:'codex',dir:path.join(f.main,'planned-project'),prompt:'owned task'}).includes(launch.sq(path.join(f.main,'planned-project'))));
+});

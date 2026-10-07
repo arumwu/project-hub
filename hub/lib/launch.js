@@ -126,11 +126,26 @@ function scopedArgs(ai, original = [], { dir, writableDirs = [] } = {}) {
     args.push(value);
   }
   args.push(...(ai === 'codex' ? ['--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.writable_roots=[]'] : ['--permission-mode', 'acceptEdits']));
-  const current = dir && path.resolve(dir), roots = new Set();
+  const home = fs.existsSync(os.homedir()) ? fs.realpathSync(os.homedir()) : path.resolve(os.homedir());
+  const broadRoot = actual => actual === path.parse(actual).root || actual === home || actual === '/Volumes' || path.dirname(actual) === '/Volumes';
+  let current;
+  if (dir) {
+    if (typeof dir !== 'string' || !path.isAbsolute(dir)) throw new Error(lt('形式が違います'));
+    current = path.resolve(dir);
+    try {
+      current = fs.realpathSync(current);
+      if (!fs.statSync(current).isDirectory()) throw new Error(lt('形式が違います'));
+    } catch (error) {
+      // Pure command-composition callers may provide an as-yet nonexistent project path.
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+    }
+    if (broadRoot(current)) throw new Error(lt('形式が違います'));
+  }
+  const roots = new Set();
   for (const candidate of writableDirs) {
     if (typeof candidate !== 'string' || !path.isAbsolute(candidate)) throw new Error(lt('形式が違います'));
     const actual = fs.realpathSync(candidate);
-    if (!fs.statSync(actual).isDirectory() || actual === path.parse(actual).root || actual === os.homedir() || actual === '/Volumes' || path.dirname(actual) === '/Volumes') throw new Error(lt('形式が違います'));
+    if (!fs.statSync(actual).isDirectory() || broadRoot(actual)) throw new Error(lt('形式が違います'));
     if (actual !== current) roots.add(actual);
   }
   for (const root of roots) args.push('--add-dir', root);

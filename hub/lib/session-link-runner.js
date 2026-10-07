@@ -116,6 +116,7 @@ class SessionLinkRunner {
     finally { if (directory !== undefined) fs.closeSync(directory); }
   }
   busy() { return [...this.runs.values()].some(run => run.busy); }
+  alive(run) { if (run.finished) throw error('stopped'); }
   status(id) {
     const run = this.runs.get(id);
     return run ? { id, requestId: run.requestId, busy: run.busy, phase: run.phase, text: [...run.texts.values()].join('\n\n'), error: run.error || '', code: run.code || '',
@@ -137,16 +138,21 @@ class SessionLinkRunner {
     this.runs.set(id, run);
     try {
       if (!(await this.guard())) throw error('guard');
+      this.alive(run);
       const ref = await this.referenceFor(id);
+      this.alive(run);
       run.provider = ref.provider; run.sid = ref.sourceSessionId || ref.sessionId;
       run.file = ref.file || ref.transcriptPath; run.cwd = ref.cwd;
       if (!['claude', 'codex'].includes(run.provider) || !UUID.test(run.sid || '')) throw error('unsupported');
       if (!run.file || !path.isAbsolute(run.cwd || '') || !fs.statSync(run.cwd).isDirectory() || ref.active === true) throw error('source');
       const original = await this.history(id);
+      this.alive(run);
       if (original.broken || original.active === true || !original.signature) throw error('source');
       run.originalSignature = original.signature; run.stamp = fileStamp(run.file); run.sourceSnapshot = sourceSnapshot(run.file);
       if (!(await this.guard())) throw error('guard');
+      this.alive(run);
       const fresh = await this.referenceFor(id);
+      this.alive(run);
       if ((fresh.sourceSessionId || fresh.sessionId) !== run.sid || (fresh.file || fresh.transcriptPath) !== run.file || fileStamp(run.file) !== run.stamp) throw error('source');
       if ([...this.runs.values()].some(other => other !== run && other.busy && other.provider === run.provider && other.sid === run.sid)) throw error('busy');
       this.persist(run, 'preparing');
@@ -178,13 +184,17 @@ class SessionLinkRunner {
   async start(run, text) {
     if (run.provider === 'codex') {
       await this.rpc(run, 'initialize', { clientInfo: { name: 'ai_session_link', title: 'AI Session Link', version: '0.1.0' } });
+      this.alive(run);
       this.write(run, { method: 'initialized' });
       const read = await this.rpc(run, 'thread/read', { threadId: run.sid, includeTurns: false });
+      this.alive(run);
       if (read.thread?.id !== run.sid || read.thread?.status?.type === 'active') throw error(read.thread?.id !== run.sid ? 'mismatch' : 'busy');
       const result = await this.rpc(run, 'thread/resume', { threadId: run.sid });
+      this.alive(run);
       if (result.thread?.id !== run.sid) throw error('mismatch');
       await this.acceptNativeBookkeeping(run);
       if (!(await this.guard())) throw error('guard');
+      this.alive(run);
       run.verifiedSession = true; run.phase = 'running'; this.persist(run, 'sending');
       run.turnRequested = true; run.earlyFrames = [];
       const started = await this.rpc(run, 'turn/start', { threadId: run.sid, input: [{ type: 'text', text }] });
@@ -193,8 +203,10 @@ class SessionLinkRunner {
       for (const frame of run.earlyFrames.splice(0)) this.frame(run, frame);
     } else {
       await this.rpc(run, 'initialize', { hooks: null });
+      this.alive(run);
       await this.acceptNativeBookkeeping(run);
       if (!(await this.guard())) throw error('guard');
+      this.alive(run);
       run.phase = 'running'; this.persist(run, 'sending');
       this.write(run, { type: 'user', session_id: run.sid, parent_tool_use_id: null, message: { role: 'user', content: text } });
     }
@@ -235,6 +247,7 @@ class SessionLinkRunner {
     child.stderr.on('data', part => { run.stderr = ((run.stderr || '') + part).slice(-4000); });
     child.on('error', e => this.fail(run, Object.assign(Error(e.code === 'ENOENT' ? 'The native provider CLI is not installed or is not on PATH.' : 'The native provider could not start.'), { code: 'cli' })));
     child.once('close', code => {
+      run.closed = true;
       if (run.finished) { run.busy = false; clearTimeout(run.killTimer); return; }
       if (!run.result || code !== 0) return this.fail(run, Object.assign(Error(run.resultError || run.stderr || 'The native provider ended before completing the turn.'), { code: 'provider' }));
       this.complete(run).catch(e => this.fail(run, e));
@@ -351,9 +364,9 @@ class SessionLinkRunner {
   cleanup(run) { clearTimeout(run.timer); for (const p of run.pending.values()) { clearTimeout(p.timer); p.reject(error('protocol')); } run.pending.clear(); run.approvals.clear(); }
   fail(run, e) {
     if (run.finished) return;
-    run.finished = true; run.busy = Boolean(run.child && run.child.exitCode == null); run.phase = e.code === 'stopped' ? 'stopped' : 'failed'; run.error = this.message(e.code, e.message || ERRORS.protocol); run.code = e.code || 'protocol';
+    run.finished = true; run.busy = Boolean(run.child && !run.closed && run.child.exitCode == null); run.phase = e.code === 'stopped' ? 'stopped' : 'failed'; run.error = this.message(e.code, e.message || ERRORS.protocol); run.code = e.code || 'protocol';
     this.cleanup(run);
-    if (run.child && !run.child.killed) {
+    if (run.child && !run.closed && !run.child.killed) {
       run.child.kill('SIGTERM');
       if (run.busy) { run.killTimer = setTimeout(() => { if (run.child.exitCode == null) run.child.kill('SIGKILL'); }, 5000); run.killTimer.unref?.(); }
     }

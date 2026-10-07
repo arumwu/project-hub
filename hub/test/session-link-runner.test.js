@@ -43,7 +43,7 @@ function fixture(t, provider, options = {}) {
         while ((end = rest.indexOf('\n')) >= 0) {
           const frame = JSON.parse(rest.slice(0, end)); rest = rest.slice(end + 1); frames.push(frame);
           if (provider === 'codex') {
-            if (frame.method === 'initialize') emit(child, { id: frame.id, result: {} });
+            if (frame.method === 'initialize') { if (options.signalExit) queueMicrotask(() => child.emit('close', null, 'SIGTERM')); else emit(child, { id: frame.id, result: {} }); }
             else if (frame.method === 'thread/read') emit(child, { id: frame.id, result: { thread: { id: options.wrong ? WRONG : SID, status: { type: options.active ? 'active' : 'idle' } } } });
             else if (frame.method === 'thread/resume') { if (options.changeAtResume) fs.appendFileSync(file, 'external update\n'); if (options.administrativeResume) fs.appendFileSync(file, JSON.stringify({ type: 'event_msg', payload: { type: 'thread_settings_applied' } }) + '\n'); emit(child, { id: frame.id, result: { thread: { id: SID } } }); }
             else if (frame.method === 'turn/start') {
@@ -222,4 +222,30 @@ test('a concurrent conversation append while resume bookkeeping is checked canno
   await f.runner.send({ id: LINK, text: 'message', requestId: REQ });
   assert.equal((await wait(f.runner, 'failed')).code, 'source'); assert.equal(injected, true);
   assert.equal(f.frames.some(x => x.method === 'turn/start'), false);
+});
+test('stop during the initial asynchronous check prevents even a native child from starting', async t => {
+  let release;
+  const f = fixture(t, 'codex', { runner: { guard: () => new Promise(resolve => { release = resolve; }) } });
+  const sending = f.runner.send({ id: LINK, text: 'message', requestId: REQ });
+  await f.runner.stop(LINK); release(true);
+  await assert.rejects(sending, e => e.code === 'stopped');
+  assert.equal(f.calls.length, 0); assert.equal(f.runner.busy(), false);
+  assert.deepEqual(fs.readFileSync(f.file), f.original);
+});
+test('stop while the final native pre-send guard waits cannot send a model turn afterwards', async t => {
+  let release, count = 0;
+  const f = fixture(t, 'codex', { runner: { guard: () => ++count === 3 ? new Promise(resolve => { release = resolve; }) : Promise.resolve(true) } });
+  await f.runner.send({ id: LINK, text: 'message', requestId: REQ });
+  for (let n = 0; n < 100 && !release; n++) await new Promise(r => setTimeout(r, 5));
+  assert.equal(typeof release, 'function'); await f.runner.stop(LINK); release(true);
+  await wait(f.runner, 'stopped'); await new Promise(r => setTimeout(r, 10));
+  assert.equal(f.frames.some(x => x.method === 'turn/start'), false);
+  assert.equal(f.calls.length, 1); assert.equal(f.children[0].killed, true);
+});
+test('an already closed native process leaves failed status available without keeping Hub permanently busy', async t => {
+  const f = fixture(t, 'codex', { signalExit: true });
+  await f.runner.send({ id: LINK, text: 'message', requestId: REQ });
+  const result = await wait(f.runner, 'failed');
+  assert.equal(result.busy, false); assert.equal(f.runner.busy(), false);
+  assert.equal(f.children[0].killed, false); assert.equal(f.frames.some(x => x.method === 'turn/start'), false);
 });

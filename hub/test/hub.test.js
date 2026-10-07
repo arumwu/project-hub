@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { stripVTControlCharacters } = require('util');
 const { parseYaml, parseDoc, setScalar } = require('../lib/frontmatter');
 const { buildCommand } = require('../lib/launch');
 const chatLib = require('../lib/chat');
@@ -17,6 +18,26 @@ const TPL = path.join(HUB, '..', 'docs', 'project-hub', 'templates');
 // could run a real `claude` from a shell; keep PTY fixtures off the user's PATH.
 const SHELL_ENV = { PATH: '/usr/bin:/bin', INPUTRC: '/dev/null', BASH_ENV: '/dev/null',
   ENV: '/dev/null', PS1: 'test> ', BASH_SILENCE_DEPRECATION_WARNING: '1' };
+
+// PTY startup and output depend on the runner's load; wait for evidence, not elapsed time.
+async function waitFor(predicate, description, timeout = 10000) {
+  const deadline = Date.now() + timeout;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, `Timed out waiting for ${description}`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+const atShellPrompt = session => stripVTControlCharacters(session.buf).replace(/\r/g, '').endsWith('test> ');
+
+async function withPtyFixture(sessions, options, fn) {
+  const session = sessions.start(options), got = [];
+  const off = sessions.watch(options.project, options.task, options.ai, event => got.push(event));
+  try { return await fn({ session, got }); }
+  finally {
+    off();
+    sessions.stop(options.project, options.task, options.ai);
+  }
+}
 
 test('roles.yaml を読める', () => {
   const r = parseYaml(fs.readFileSync(path.join(TPL, '_hub', 'roles.yaml'), 'utf8'));
@@ -357,14 +378,17 @@ test('作業画面: 本物の端末を開き、入力と出力が通る', async 
   assert.strictEqual(sessions2.list().length, 2);
   const got = [];
   const off = sessions2.watch('サンプルアプリ', 'pty-test', 'claude', ev => got.push(ev));
+  ctx.after(off);
+  await waitFor(() => ['claude', 'codex'].every(ai => sessions2.get('サンプルアプリ', 'pty-test', ai).buf.includes('test> ')), 'both PTY shell prompts');
   assert.ok(sessions2.write('サンプルアプリ', 'pty-test', 'claude', 'echo HELLO-$((1+2))\r'));
-  await new Promise(r => setTimeout(r, 800));
+  await waitFor(() => got.some(e => e.type === 'data') && got.map(e => e.data || '').join('').includes('HELLO-3'), 'PTY command output');
   const text = got.filter(e => e.type === 'data').map(e => e.data).join('');
   assert.match(text, /HELLO-3/);
   assert.ok(sessions2.resize('サンプルアプリ', 'pty-test', 'claude', 120, 40));
   // 相手に渡す：codex 側の画面に文字が届く
   const got2 = [];
   const off2 = sessions2.watch('サンプルアプリ', 'pty-test', 'codex', ev => got2.push(ev));
+  ctx.after(off2);
   const hp = path.join(ROOT2, 'Product', 'サンプルアプリ', '.ai', 'tasks', 'pty-test.md');
   fs.writeFileSync(hp, '---\nid: pty-test\ntitle: t\nstate: 実行中\n---\n');
   // 相手が作業中（画面が動いている）なら断る
@@ -376,15 +400,16 @@ test('作業画面: 本物の端末を開き、入力と出力が通る', async 
   assert.strictEqual(hj.kind, 'screen'); // bash なので会話の記録は無く、画面の文字で代わりにする
   assert.match(fs.readFileSync(hj.packet, 'utf8'), /HELLO-3/);
   assert.match(fs.readFileSync(hj.packet, 'utf8'), /新しい実行の許可ではない/);
-  await new Promise(r => setTimeout(r, 500));
+  await waitFor(() => got2.map(e => e.data || '').join('').includes('Claude Code から交代') && atShellPrompt(sessions2.get('サンプルアプリ', 'pty-test', 'codex')), 'PTY handoff input and the next shell prompt');
   assert.match(got2.filter(e => e.type === 'data').map(e => e.data).join(''), /Claude Code から交代/);
   // モデル・思考を変える：作業ファイルに残り、動いている AI に /model・/effort が届く
   await post2('/api/cli-models', { claude: {}, codex: { '6terra': '6terra' } });
   const sw = await (await post2('/api/term/switch', { project: 'サンプルアプリ', task: 'pty-test', ai: 'codex', field: 'model', value: '6terra' })).json();
   assert.deepStrictEqual([sw.sent, sw.command, sw.model], [true, '/model 6terra', '6terra']);
+  await waitFor(() => got2.map(e => e.data || '').join('').includes('/model 6terra') && atShellPrompt(sessions2.get('サンプルアプリ', 'pty-test', 'codex')), 'PTY model input and the next shell prompt');
   const sw2 = await (await post2('/api/term/switch', { project: 'サンプルアプリ', task: 'pty-test', ai: 'codex', field: 'effort', value: 'MAX' })).json();
   assert.strictEqual(sw2.command, '/effort max');
-  await new Promise(r => setTimeout(r, 500));
+  await waitFor(() => ['/model 6terra', '/effort max'].every(command => got2.map(e => e.data || '').join('').includes(command)) && atShellPrompt(sessions2.get('サンプルアプリ', 'pty-test', 'codex')), 'PTY model and effort input and the next shell prompt');
   const out2 = got2.filter(e => e.type === 'data').map(e => e.data).join('');
   assert.match(out2, /\/model 6terra/);
   assert.match(out2, /\/effort max/);
@@ -394,6 +419,7 @@ test('作業画面: 本物の端末を開き、入力と出力が通る', async 
   off();
   // ストリームで読める
   const ac = new AbortController();
+  ctx.after(() => ac.abort());
   const r = await fetch(`${BASE2}/api/term/stream?project=${encodeURIComponent('サンプルアプリ')}&task=pty-test&ai=claude`, { signal: ac.signal });
   const reader = r.body.getReader();
   const { value } = await reader.read();
@@ -557,6 +583,27 @@ test('本体に取り込む：作業用コピーを取り込み、作業を完�
 });
 
 
+test('PTY の準備を待ち、検証が失敗してもテストの端末と監視を片付ける', async () => {
+  const { Sessions } = require('../lib/sessions');
+  const sessions = new Sessions();
+  if (!sessions.available()) return;
+  const failure = new Error('fixture assertion failure');
+  let fixture;
+  await assert.rejects(withPtyFixture(sessions, {
+    project: 'fixture', task: 'cleanup', ai: 'codex', dir: ROOT2,
+    command: '/bin/bash', env: SHELL_ENV,
+    // Deliberately start after the old 400ms wait to exercise runner startup delay.
+    args: ['--noprofile', '--norc', '-c', 'sleep 0.6; PS1="test> " exec /bin/bash --noprofile --norc -i'], cols: 80, rows: 24
+  }, async ({ session }) => {
+    fixture = session;
+    await waitFor(() => session.buf.includes('test> '), 'delayed PTY shell prompt');
+    throw failure;
+  }), error => error === failure);
+  assert.strictEqual(sessions.get('fixture', 'cleanup', 'codex'), null);
+  assert.strictEqual(fixture.watchers.size, 0);
+  await waitFor(() => fixture.exited, 'failed fixture PTY exit');
+});
+
 test('ファイルを渡す：Inbox に保存し、作業ファイルに記録し、動いている AI の入力欄に場所を入れる', async () => {
   const tf = path.join(ROOT2, 'Product', 'サンプルアプリ', '.ai', 'tasks', 'up-test.md');
   fs.writeFileSync(tf, '---\nid: up-test\ntitle: 渡す\nstate: 実行中\n---\n');
@@ -569,14 +616,15 @@ test('ファイルを渡す：Inbox に保存し、作業ファイルに記録�
   assert.strictEqual(fs.readFileSync(j.path, 'utf8'), 'PNG');
   assert.ok(fs.readFileSync(tf, 'utf8').includes(`ファイルを渡した: ${j.path}`));
   if (sessions2.available()) {
-    sessions2.start({ project: 'サンプルアプリ', task: 'up-test', ai: 'codex', dir: ROOT2, command: '/bin/bash', env: SHELL_ENV, args: ['--noprofile', '--norc', '-i'], cols: 80, rows: 24 });
-    const got = [];
-    const off = sessions2.watch('サンプルアプリ', 'up-test', 'codex', ev => got.push(ev));
-    j = await (await up({ project: 'サンプルアプリ', task: 'up-test', ai: 'codex', name: 'shot.png' }, Buffer.from('x'))).json();
-    assert.strictEqual(j.typed, true);
-    await new Promise(r => setTimeout(r, 400));
-    assert.ok(got.map(e => e.data || '').join('').includes(path.basename(j.path)));
-    off(); sessions2.stop('サンプルアプリ', 'up-test', 'codex');
+    // Keep the file name intact even when the runner's temporary path is long.
+    await withPtyFixture(sessions2, { project: 'サンプルアプリ', task: 'up-test', ai: 'codex', dir: ROOT2, command: '/bin/bash', env: SHELL_ENV, args: ['--noprofile', '--norc', '-i'], cols: 512, rows: 24 }, async ({ session, got }) => {
+      await waitFor(() => session.buf.includes('test> '), 'upload PTY shell prompt');
+      j = await (await up({ project: 'サンプルアプリ', task: 'up-test', ai: 'codex', name: 'shot.png' }, Buffer.from('x'))).json();
+      assert.strictEqual(j.typed, true);
+      await waitFor(() => got.map(e => e.data || '').join('').includes(path.basename(j.path)), 'uploaded file path in the PTY');
+      assert.ok(got.map(e => e.data || '').join('').includes(path.basename(j.path)));
+    });
+    assert.strictEqual(sessions2.get('サンプルアプリ', 'up-test', 'codex'), null);
   }
   // 無い作業・CSRF の印なしは断る
   assert.strictEqual((await up({ project: 'サンプルアプリ', task: 'nai', name: 'a' }, Buffer.from('x'))).status, 400);

@@ -1897,9 +1897,9 @@ function renderSettings() {
       <p>新規プロジェクト・子作業・分岐の初期値です。役割の担当・既存作業・各プロジェクトで前回選んだ［始める］欄は変わりません。</p>
       <div id="initial-pick">${initialPickHtml()}</div></div>
     <div class="card"><h2>Mac のファイルの許可</h2>
-      <p>書類・デスクトップ・ダウンロードのフォルダを、Project Hub が読めるか確かめます。「システム設定 → プライバシーとセキュリティ → ファイルとフォルダ」に Project Hub が無い時は、［確認をもう一度出す］を押し、Mac の確認で「許可」を選んでください。</p>
-      ${/ProjectHubApp/.test(navigator.userAgent) ? UI.template`<div class="acts"><a class="btn plain" href="hubapp://access">許可を確かめる</a><a class="btn" href="hubapp://access?reset=1">確認をもう一度出す</a></div>
-      <p class="small">それでも出ない時は、確かめた後の画面の［フルディスクアクセスを開く］から、Project Hub をリストに入れてオンにしてください（アプリのメニューからも同じことができます）。</p>`
+      <p>書類・デスクトップ・ダウンロードと、現在の Hub の作業場所を Project Hub が読めるか確かめます。外付けディスクの別のプロジェクトは［外部のフォルダを選んで確認］で1つ選べます。</p>
+      ${/ProjectHubApp/.test(navigator.userAgent) ? UI.template`<div class="acts"><a class="btn plain" href="hubapp://access">許可を確かめる</a><a class="btn" href="hubapp://access?reset=1">確認をもう一度出す</a><a class="btn plain" href="hubapp://external-access">外部のフォルダを選んで確認</a></div>
+      <p class="small">読めない時は「システム設定 → プライバシーとセキュリティ → ファイルとフォルダ」を確認してください。これは Mac が読むことを許す設定です。AI が書き込める場所は、その作業の作業場所と同じプロジェクトの台帳に限ります。</p>`
         : UI.html('<p class="small">アプリ（Project Hub.app）で開いた時に使えます。アプリが古い時は、ターミナルで <code>bash hub/app/build-app.sh</code> を実行して作り直してください。</p>')}</div>
     <div class="card"><h2>外から使う（iPhone）</h2>
       <p>iPhone からも、Mac と同じ操作ができます。操作は接続先の Mac で実行されます。</p>
