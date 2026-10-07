@@ -28,7 +28,7 @@ HUB_LANG=zh-TW HUB_APP_DIR=/Applications HUB_ROOT="/Volumes/External/AI-Workspac
 ## 使用前須知
 
 - **單一使用者的 Mac**：服務只監聽 `127.0.0.1:4545`，會檢查 Host 與 Origin，本機操作沒有登入驗證。不要作為公開 Web 服務或多人共用伺服器。遠端操作須另外啟用密語驗證，見「從外部使用（iPhone）」。
-- **AI 權限確認**：預設 Claude Code 使用 `--dangerously-skip-permissions`，Codex 使用 `--dangerously-bypass-approvals-and-sandbox` 啟動（`lib/launch.js`）。前者略過權限確認，後者同時略過權限確認與沙箱。AI 可使用你的帳號權限修改檔案與執行指令；可在 `_hub/roles.yaml` 的 `permissions` 調整啟動方式。
+- **AI 權限與工作範圍**：Hub 對話與終端機以 Claude Code 的 `--permission-mode acceptEdits`、Codex 的 `--sandbox workspace-write` 啟動（`lib/launch.js`）。可寫範圍為實際工作資料夾及該 Hub 專案的台帳目錄；工作用副本不會取得原始程式碼或參考資料夾的寫入權限。舊角色設定的略過確認、sandbox 或額外資料夾參數會在啟動時收斂，使用者的 `roles.yaml` 本身不改寫。連結原會話使用另外的原生續接流程，保留原工具既有權限。
 - **會被複製的設定**：建立工作副本時，會複製主專案最上層尚未納入 Git 的 `.env`、`.env.*`、`.dev.vars`、`.dev.vars.*`、`.npmrc`，以及 `.claude/settings.local.json`，讓 AI 能執行專案測試。
 - **自動 Git 儲存**：開始工作前、首次儲存與合併工作副本時，會先 `git add -A` 再提交。提交不顯示終端機確認，使用 `--no-verify`，因此不執行 pre-commit 等 hooks。未設定 Git 身分時使用 `Project Hub <hub@localhost>`。
   - 新增的 `.env` 類檔案、`.npmrc`、`.dev.vars` 類檔案與 `.claude/settings.local.json` 會排除於提交，即使先手動 `git add` 也會取消這些新檔案的暫存，但保留本機檔案。`.env.example`、`.env.sample` 作為範例會納入提交。
@@ -91,6 +91,18 @@ HUB_LANG=zh-TW HUB_APP_DIR=/Applications HUB_ROOT="/Volumes/External/AI-Workspac
 使用 Agy（Gemini 3.1 Pro (High)）前，先安裝 Agy CLI 並用 Google 帳號登入，再於設定重新取得模型清單，即可從對話模型選單或終端機啟動 Agy。
 
 Hub 不修改 CLI 的登入驗證。CLI 只在按下更新按鈕時更新。
+
+## 連結 Codex／Claude 原會話
+
+在設定的「連結 Codex／Claude 會話」按「選擇群組或會話」，只勾選需要的內容；預設全部未選取。按「預覽選取內容」查看數量、缺少的紀錄與讀取警告，再按「確認連結」。
+
+Hub 只保存來源連結，不建立會話副本或新任務。原會話、程式碼與工作資料夾都留在原處；查看時讀取原始的人與 AI 文字，不搬移登入、OAuth、權限設定、附件、工具結果或隱藏推理。保存連結不會啟動 AI；「移除連結」只移除 Hub 的入口，來源缺失時則保留連結並顯示原因。
+
+在側邊欄「外部會話」開啟連結，按「送到同一會話」後，Claude 以原生會話 ID 接續，Codex 以相同 thread ID 讀取並接續。原工具使用既有登入與權限，在原工作資料夾執行並保存新回合；需要批准的操作由你確認，停止只中斷本次啟動的程序。來源變動、缺失或正在執行時會停止，不會改開新會話或分支。
+
+原 App 與 Hub 使用同一份會話紀錄；重新開啟原會話可在原 App 閱讀，不保證兩個畫面即時同步刷新。確認原工具回傳同一個會話 ID、原始歷史已更新後，才標示完成。失敗或重啟後若無法判定是否送達，請先查看原會話，再決定是否重送。
+
+連結與續聊只開放本機操作。讀取超過上限或來源途中變更時會顯示原因並停止，不會默默截短對話。可獨立使用的 [AI Session Exporter](https://github.com/arumwu/ai-session-exporter) 提供相同來源連結、原會話續聊與選取匯出 JSON／Markdown，不需要 Hub。
 
 ## 使用量顯示
 

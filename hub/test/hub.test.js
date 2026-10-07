@@ -22,7 +22,7 @@ test('roles.yaml を読める', () => {
   const r = parseYaml(fs.readFileSync(path.join(TPL, '_hub', 'roles.yaml'), 'utf8'));
   assert.deepStrictEqual(r.models.codex, ['GPT-6.1-Sol']);
   assert.deepStrictEqual(r.roles['文章'].main, ['claude-code', 'Opus 5.5', '中']);
-  assert.strictEqual(r.permissions['claude-code'], 'claude --dangerously-skip-permissions');
+  assert.strictEqual(r.permissions['claude-code'], 'claude --permission-mode acceptEdits');
   assert.strictEqual(r.switch.auto, false);
 });
 
@@ -138,7 +138,7 @@ test('1行だけ書き換え、コメントを残す', () => {
 
 test('起動コマンドは場所と指示を安全に囲む', () => {
   const c = buildCommand({ ai: 'claude', dir: "/a/サンプルアプリ/it's", prompt: 'x; rm -rf ~' });
-  assert.strictEqual(c, "cd '/a/サンプルアプリ/it'\\''s' && claude --dangerously-skip-permissions 'x; rm -rf ~'");
+  assert.strictEqual(c, "cd '/a/サンプルアプリ/it'\\''s' && 'claude' '--permission-mode' 'acceptEdits' 'x; rm -rf ~'");
   assert.throws(() => buildCommand({ ai: 'evil', dir: '/', prompt: '' }));
 });
 
@@ -201,7 +201,7 @@ test('一覧に4つのプロジェクトと作業が出る', async () => {
 test('続きをやる: 作業場所が無ければ台帳のフォルダで起動', async () => {
   const r = await (await post('/api/continue', { project: 'サンプルアプリ', task: 'sample-app-01', ai: 'codex' })).json();
   assert.strictEqual(r.dir, path.join(ROOT, 'Product', 'サンプルアプリ'));
-  assert.match(r.command, /^cd '.*サンプルアプリ' && codex --dangerously-bypass-approvals-and-sandbox /);
+  assert.match(r.command, /^cd '.*サンプルアプリ' && 'codex' '--sandbox' 'workspace-write' /);
   assert.match(r.command, /'【モデルの決まり.*作業ID sample-app-01/s);
   assert.ok(r.command.includes(launchLib.CONTEXT_RULE));
   assert.match(r.command, /【この番の起動】[^\n]*Codex・GPT-6.1-Sol（CLI 引数 --model gpt-6.1-sol）/);
@@ -613,7 +613,7 @@ test('会話画面：送るたびに AI を選べ、変えた時は見ていな�
     a = rows().filter(r => r.role === 'assistant');
     assert.strictEqual(a[1].ai, 'codex');
     assert.match(a[1].text, /<previous_conversation>[\s\S]*はじめまして[\s\S]*<\/previous_conversation>[\s\S]*つづきをお願い/);
-    assert.match(a[1].text, /ARGS\[exec --dangerously-bypass-approvals-and-sandbox --json --skip-git-repo-check -c model_auto_compact_token_limit=160000 -c model_auto_compact_token_limit_scope="total" --model gpt-6-sol -c model_reasoning_effort=high -\]/);
+    assert.match(a[1].text, /ARGS\[exec --sandbox workspace-write -c sandbox_workspace_write\.writable_roots=\[\](?: --add-dir [^\]]+)? --json --skip-git-repo-check -c model_auto_compact_token_limit=160000 -c model_auto_compact_token_limit_scope="total" --model gpt-6-sol -c model_reasoning_effort=high -\]/);
     // Claude に戻す → 自分の会話の続き（--resume）。見ていないのは Codex とのやり取りだけ
     await say('claude', 'Opus 5.5', 'まとめて');
     await waitReply(3);
