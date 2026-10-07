@@ -23,7 +23,7 @@ jobs:
       - name: Verify terminal prebuild
         run: node hub/node_modules/node-pty/scripts/prebuild.js
       - name: Japanese and Traditional Chinese regressions
-        run: npm --prefix hub test
+        run: TMPDIR="$(cd "$RUNNER_TEMP" && pwd -P)" npm --prefix hub test
       - name: Build portable Traditional Chinese App
         env:
           HUB_LANG: zh-TW
